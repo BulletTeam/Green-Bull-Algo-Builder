@@ -1,0 +1,9 @@
+# ডেটা ও গোপন ফাইল কখনো GitHub-এ যাবে না
+*.db
+*.npz
+*.key
+upstox_token.txt
+greenbull-data/
+__pycache__/
+*.pyc
+.env
