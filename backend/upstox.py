@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 import requests
 
-from config import TOKEN_FILE, V3
+from config import TOKEN_FILE, V2, V3
 
 
 class TokenError(Exception):
@@ -67,3 +67,54 @@ def fetch_spot_1m(key, d0, d1):
             rows += data.get("candles", []) or []
         cur = nxt + dt.timedelta(days=1)
     return rows
+
+
+def _list(body):
+    d = body.get("data") if isinstance(body, dict) else None
+    return d if isinstance(d, list) else []
+
+
+def get_expiries(key):
+    """এক্সপায়ারি তালিকা (date-এর sorted তালিকা)। ব্যর্থ হলে None।"""
+    st, body = get("%s/expiries?instrument_key=%s" % (V2, quote(key, safe="")))
+    if st == 401:
+        raise TokenError("401: টোকেন কাজ করছে না বা মেয়াদ শেষ")
+    if st != 200:
+        return None
+    out = set()
+    for x in _list(body):
+        try:
+            out.add(dt.date.fromisoformat(str(x)[:10]))
+        except ValueError:
+            pass
+    return sorted(out)
+
+
+def get_contracts(key, expiry):
+    """(status, কন্ট্র্যাক্টের তালিকা) — একটি এক্সপায়ারির সব CE/PE।"""
+    url = "%s/option/contract?instrument_key=%s&expiry_date=%s" % (V2, quote(key, safe=""), expiry.isoformat())
+    st, body = get(url)
+    if st == 401:
+        raise TokenError("401: টোকেন কাজ করছে না বা মেয়াদ শেষ")
+    return st, _list(body)
+
+
+def fetch_option_1m(ikey, d0, d1):
+    """একটি অপশন কন্ট্র্যাক্টের ১-মিনিট ক্যান্ডেল d0..d1। (সব ঠিক কি না, কাঁচা সারি)।"""
+    q = quote(ikey, safe="")
+    rows = []
+    ok = True
+    cur = d0
+    while cur <= d1:
+        nxt = min(cur + dt.timedelta(days=27), d1)     # একবারে সর্বোচ্চ ~১ মাস
+        url = "%s/historical-candle/%s/1minute/%s/%s" % (V2, q, nxt.isoformat(), cur.isoformat())
+        st, body = get(url)
+        if st == 401:
+            raise TokenError("401: টোকেন কাজ করছে না বা মেয়াদ শেষ")
+        if st != 200:
+            ok = False
+        data = body.get("data") if isinstance(body, dict) else None
+        if isinstance(data, dict):
+            rows += data.get("candles", []) or []
+        cur = nxt + dt.timedelta(days=1)
+    return ok, rows

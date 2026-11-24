@@ -3,6 +3,7 @@
 চালানো (Termux-এ, backend ফোল্ডার থেকে):
   python downloader.py            সব ইনডেক্স, শুধু নতুন দিন যোগ হয়
   python downloader.py BN         একটি ইনডেক্স
+  python downloader.py --since 2026-08-01     ওই দিন থেকে আবার নামায় (সব ইনডেক্স)
 """
 import datetime as dt
 import sys
@@ -43,13 +44,16 @@ def to_rows(candles):
     return out
 
 
-def update_spot(code):
-    """একটি ইনডেক্সের স্পট ১-মিনিট আপডেট করে। ফেরত দেয় একটি বাংলা লাইন।"""
+def update_spot(code, since=None):
+    """একটি ইনডেক্সের স্পট ১-মিনিট আপডেট করে। ফেরত দেয় একটি বাংলা লাইন।
+    since (date) দিলে ওই দিন থেকে আবার নামায় (পুরনো ডেটা শুধরাতে)।"""
     info = INSTR[code]
     c = store.conn()
     try:
         last = store.last_minute(c, code)
-        if last is not None:
+        if since is not None:
+            start = since
+        elif last is not None:
             start = (EPOCH + dt.timedelta(minutes=last)).date()   # শেষ দিনটা আবার, অসম্পূর্ণ দিন পূর্ণ হতে
         else:
             start = dt.date.fromisoformat(START_DAY)
@@ -84,6 +88,13 @@ def update_spot(code):
 
 def main():
     args = sys.argv[1:]
+    since = None
+    if "--since" in args:
+        i = args.index("--since")
+        if i + 1 >= len(args):
+            sys.exit("--since এর পরে তারিখ দিন, যেমন --since 2026-08-01")
+        since = dt.date.fromisoformat(args[i + 1])
+        args = args[:i] + args[i + 2:]
     codes = list(INSTR) if not args else [a.upper() for a in args]
     for code in codes:
         if code not in INSTR:
@@ -91,7 +102,7 @@ def main():
     for code in codes:
         print("[%s] %s" % (code, INSTR[code]["name"]))
         try:
-            print("  ", update_spot(code))
+            print("  ", update_spot(code, since))
         except Exception as e:
             print("   ত্রুটি:", e)
 
