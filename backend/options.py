@@ -9,6 +9,7 @@
   python options.py N50                                       একটি ইনডেক্সের সব
   python options.py                                           চারটাই
   python options.py status                                    কতটা নেমেছে + ফাইলের আকার
+  python options.py compact                                   ফাইল ছোট করা (বড় ডাউনলোড শেষে)
 """
 import bisect
 import datetime as dt
@@ -65,8 +66,10 @@ def keep_rows(raw, strike, bands):
         b = bands.get(t // 1440)
         if b is None or not (b[0] <= strike <= b[1]):
             continue
-        oi = float(r[6]) if len(r) > 6 and r[6] is not None else 0.0
-        out.append((t, float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5]), oi))
+        oi = int(float(r[6])) if len(r) > 6 and r[6] is not None else 0
+        out.append((t, round(float(r[1]) * 100), round(float(r[2]) * 100), round(float(r[3]) * 100),
+                    round(float(r[4]) * 100), int(float(r[5])), oi))
+    out.sort()      # Upstox নতুন-থেকে-পুরনো দেয়; পুরনো-থেকে-নতুন সাজালে ফাইল প্রায় অর্ধেক ছোট হয়
     return out
 
 
@@ -161,10 +164,29 @@ def status():
     print("ফাইলের আকার: %.1f MB" % (os.path.getsize(OPT_DB_FILE) / 1e6))
 
 
+def compact():
+    """ফাইল ছোট করে (VACUUM)। বড় ডাউনলোড শেষে একবার চালান। ফাঁকা জায়গা লাগে ফাইলের সমান।"""
+    oc = store.opt_conn()
+    before = os.path.getsize(OPT_DB_FILE)
+    oc.execute("VACUUM")
+    oc.close()
+    print("ফাইল ছোট: %.1f MB → %.1f MB" % (before / 1e6, os.path.getsize(OPT_DB_FILE) / 1e6))
+
+
 def main():
+    try:
+        _main()
+    except RuntimeError as e:
+        sys.exit(str(e))
+
+
+def _main():
     args = sys.argv[1:]
     if args and args[0] == "status":
         status()
+        return
+    if args and args[0] == "compact":
+        compact()
         return
     f_from = f_to = None
     for flag in ("--from", "--to"):

@@ -87,7 +87,8 @@ OPT_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS obars (
         cid INTEGER NOT NULL,
         t INTEGER NOT NULL,            -- মিনিট (epoch থেকে, IST)
-        o REAL, h REAL, l REAL, c REAL, v REAL, oi REAL,
+        o INTEGER, h INTEGER, l INTEGER, c INTEGER,   -- দাম পয়সায় (×১০০), ছোট ফাইলের জন্য
+        v INTEGER, oi INTEGER,
         PRIMARY KEY (cid, t)) WITHOUT ROWID""",
     """CREATE TABLE IF NOT EXISTS ostate (
         cid INTEGER PRIMARY KEY,
@@ -100,6 +101,10 @@ def opt_conn():
     for stmt in OPT_SCHEMA:
         c.execute(stmt)
     c.commit()
+    typ = c.execute("SELECT type FROM pragma_table_info('obars') WHERE name='o'").fetchone()
+    if typ and typ[0].upper() != "INTEGER":
+        c.close()
+        raise RuntimeError("gb_opt.db পুরনো ফরম্যাটের। মুছে ফেলে আবার চালান: rm %s" % OPT_DB_FILE)
     return c
 
 
