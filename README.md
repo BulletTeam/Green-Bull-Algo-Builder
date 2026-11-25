@@ -28,3 +28,18 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 রোজ আপডেট: `python downloader.py` (শুধু নতুন দিনগুলো যোগ হয়)।
 
 *এটি শিক্ষামূলক তথ্য, আর্থিক পরামর্শ নয়।*
+
+## বিল্ডার (ব্যাকটেস্ট UI)
+
+`builder/algo_builder.py` — ব্রাউজারে চলা ব্যাকটেস্টার। ডেটা `~/greenbull-data/` থেকে সরাসরি পড়ে (gb.db স্পট + gb_opt.db অপশন)।
+
+```
+pip install numpy pandas
+cd builder
+python algo_builder.py --db ~/greenbull-data --inst N50
+```
+
+ব্রাউজারে `http://127.0.0.1:8000` খুলুন। Data ট্যাবে ইনডেক্স (BN/N50/FIN/SEN) ও তারিখ বেছে "লোড করুন" চাপলে ডেটাসেট বদলায়।
+তারিখ না দিলে শেষ ~৬ মাস লোড হয় (১-মিনিট ডেটা বড়, ফোনের মেমোরি বাঁচাতে)।
+
+সোর্স `builder/src/`-তে (`python make.py` দিলে `algo_builder.py` আবার তৈরি হয়)।

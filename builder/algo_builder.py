@@ -1,0 +1,2809 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ALGO BUILDER - অপশন প্রিমিয়াম ব্যাকটেস্ট বিল্ডার (সব টিউনিং সেটিংস থেকে, কোডিং লাগে না)
+
+চালানো (Termux বা যেকোনো Python-এ):
+    python algo_builder.py
+তারপর ফোনের ব্রাউজারে খুলুন:   http://127.0.0.1:8000
+
+একই ফোল্ডারে থাকতে হবে:
+    banknifty_5min.csv       (স্পট ইনডেক্সের ৫ মিনিট ডেটা)
+    data_opt/opt_*.csv.gz    (download_options.py যা নামিয়েছে)
+অন্য নামে থাকলে:  python algo_builder.py --spot FILE.csv --opt FOLDER --port 8000
+
+লাগে শুধু: numpy, pandas (আপনার Termux-এ আগে থেকেই আছে)
+"""
+import os
+import sys
+import json
+import math
+import copy
+import glob
+import bisect
+import argparse
+import itertools
+import threading
+import traceback
+import datetime as dt
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+import numpy as np
+import pandas as pd
+
+NAN = float("nan")
+OPEN_MIN = 555          # 09:15
+BASE_TF = 5             # ডেটার ক্যান্ডেল মিনিট (লোডের সময় নিজে বের হয়)
+EPOCH = pd.Timestamp("1970-01-01")
+
+# =====================================================================
+#  ডেটা লোড
+# =====================================================================
+
+
+class Data:
+    pass
+
+
+def _to_min(series):
+    d = pd.to_datetime(series)
+    if getattr(d.dt, "tz", None) is not None:
+        d = d.dt.tz_localize(None)
+    return ((d - EPOCH) // pd.Timedelta(minutes=1)).to_numpy().astype("int64")
+
+
+def _to_days(series):
+    d = pd.to_datetime(series)
+    if getattr(d.dt, "tz", None) is not None:
+        d = d.dt.tz_localize(None)
+    return ((d - EPOCH) // pd.Timedelta(days=1)).to_numpy().astype("int64")
+
+
+def day_str(d):
+    return dt.date.fromordinal(719163 + int(d)).isoformat()
+
+
+def day_int(s):
+    return dt.date.fromisoformat(s).toordinal() - 719163
+
+
+def hm_str(m):
+    m = int(m) % 1440
+    return "%02d:%02d" % (m // 60, m % 60)
+
+
+def hm(s):
+    a, b = str(s).strip().split(":")
+    return int(a) * 60 + int(b)
+
+
+def _spot_finish(D, log):
+    """D.t/o/h/l/c/v ভরা থাকলে বাকি স্পট-হিসাব (দিন, BASE_TF, দৈনিক OHLC) বানায়"""
+    D.day = D.t // 1440
+    D.mod = D.t % 1440
+    global BASE_TF
+    dd = np.diff(D.t)[np.diff(D.day) == 0]
+    BASE_TF = int(np.median(dd)) if len(dd) else 5
+    D.du = np.unique(D.day)
+    st = np.flatnonzero(np.r_[True, D.day[1:] != D.day[:-1]])
+    en = np.r_[st[1:], len(D.day)]
+    D.dO = D.o[st]
+    D.dH = np.maximum.reduceat(D.h, st)
+    D.dL = np.minimum.reduceat(D.l, st)
+    D.dC = D.c[en - 1]
+    log("স্পট ডেটা: %d ক্যান্ডেল, %d দিন (%s → %s)" % (len(D.t), len(D.du), day_str(D.du[0]), day_str(D.du[-1])))
+
+
+def _opt_finish(D, log):
+    for (ex, typ, stk) in D.opt:
+        D.strikes.setdefault((ex, typ), set()).add(stk)
+    D.strikes = {k: np.array(sorted(v), dtype="float64") for k, v in D.strikes.items()}
+    D.expiries = sorted(D.exp_range.keys())
+    log("অপশন ডেটা: %d এক্সপায়ারি, %d কন্ট্র্যাক্ট" % (len(D.expiries), len(D.opt)))
+
+
+def load_data(spot_csv, opt_dir, log=print):
+    D = Data()
+    D._bars = {}
+    D._cache = {}
+    sp = pd.read_csv(spot_csv)
+    sp.columns = [c.strip().lower() for c in sp.columns]
+    for c in ["datetime", "open", "high", "low", "close"]:
+        if c not in sp.columns:
+            raise ValueError("স্পট CSV-তে '%s' কলাম নেই" % c)
+    if "volume" not in sp.columns:
+        sp["volume"] = 0
+    sp["t"] = _to_min(sp["datetime"])
+    sp = sp.sort_values("t").drop_duplicates("t")
+    mod = sp["t"] % 1440
+    sp = sp[(mod >= OPEN_MIN) & (mod <= OPEN_MIN + 374)]
+    D.t = sp["t"].to_numpy("int64")
+    D.o = sp["open"].to_numpy("float64")
+    D.h = sp["high"].to_numpy("float64")
+    D.l = sp["low"].to_numpy("float64")
+    D.c = sp["close"].to_numpy("float64")
+    D.v = sp["volume"].fillna(0).to_numpy("float64")
+    _spot_finish(D, log)
+
+    D.opt = {}
+    D.strikes = {}
+    D.exp_lot = {}
+    D.exp_range = {}
+    D.expiries = []
+    files = sorted(glob.glob(os.path.join(opt_dir, "*.csv.gz")) + glob.glob(os.path.join(opt_dir, "*.csv")))
+    want = {"datetime", "expiry", "type", "strike", "lot", "open", "high", "low", "close"}
+    for f in files:
+        try:
+            df = pd.read_csv(f, usecols=lambda c: c.strip().lower() in want)
+        except Exception as e:
+            log("  বাদ (পড়া যায়নি): %s %s" % (f, e))
+            continue
+        df.columns = [c.strip().lower() for c in df.columns]
+        if df.empty:
+            continue
+        df["t"] = _to_min(df["datetime"])
+        df["ex"] = _to_days(df["expiry"])
+        df["strike"] = df["strike"].astype(float)
+        for (ex, typ, stk), g in df.groupby(["ex", "type", "strike"], sort=False):
+            g = g.sort_values("t").drop_duplicates("t")
+            D.opt[(int(ex), str(typ), float(stk))] = (
+                g["t"].to_numpy("int64"), g["open"].to_numpy("float64"),
+                g["high"].to_numpy("float64"), g["low"].to_numpy("float64"),
+                g["close"].to_numpy("float64"))
+        for ex, g in df.groupby("ex"):
+            ex = int(ex)
+            D.exp_lot[ex] = int(g["lot"].mode().iloc[0])
+            lo, hi = int(g["t"].min()), int(g["t"].max())
+            if ex in D.exp_range:
+                lo, hi = min(lo, D.exp_range[ex][0]), max(hi, D.exp_range[ex][1])
+            D.exp_range[ex] = (lo, hi)
+        log("  লোড: %s (%d সারি)" % (os.path.basename(f), len(df)))
+    _opt_finish(D, log)
+    return D
+
+
+INSTR_NAMES = {"BN": "BankNifty", "N50": "Nifty 50", "FIN": "FinNifty", "SEN": "Sensex"}
+
+
+def load_db(db_dir, inst, d0=None, d1=None, log=print):
+    """নতুন SQLite ডেটা (gb.db স্পট + gb_opt.db অপশন) থেকে D বানায়। d0/d1 = 'YYYY-MM-DD' (ঐচ্ছিক)।
+    ফাঁকা থাকলে শেষ ~৬ মাস, কারণ ১-মিনিট ডেটা অনেক বড় — ফোনের মেমোরি বাঁচাতে।"""
+    import sqlite3
+    sp_path = os.path.join(db_dir, "gb.db")
+    op_path = os.path.join(db_dir, "gb_opt.db")
+    if not os.path.exists(sp_path):
+        raise ValueError("gb.db পাওয়া যায়নি: %s" % sp_path)
+    D = Data()
+    D._bars = {}
+    D._cache = {}
+    con = sqlite3.connect(sp_path, timeout=30)
+    try:
+        last = con.execute("SELECT MAX(t) FROM bars WHERE instr=?", (inst,)).fetchone()[0]
+        if last is None:
+            raise ValueError("%s-এর স্পট ডেটা gb.db-তে নেই" % inst)
+        day1 = day_int(d1) if d1 else int(last // 1440)
+        day0 = day_int(d0) if d0 else day1 - 182
+        rows = con.execute("SELECT t,o,h,l,c,v FROM bars WHERE instr=? AND t>=? AND t<? ORDER BY t",
+                           (inst, day0 * 1440, (day1 + 1) * 1440)).fetchall()
+    finally:
+        con.close()
+    if not rows:
+        raise ValueError("%s: এই সময়ে স্পট ডেটা নেই (%s → %s)" % (inst, day_str(day0), day_str(day1)))
+    a = np.array(rows, dtype="float64")
+    t = a[:, 0].astype("int64")
+    mod = t % 1440
+    keep = (mod >= OPEN_MIN) & (mod <= OPEN_MIN + 374)
+    D.t = t[keep]
+    D.o, D.h, D.l, D.c, D.v = (a[keep, k].copy() for k in (1, 2, 3, 4, 5))
+    _spot_finish(D, log)
+
+    D.opt = {}
+    D.strikes = {}
+    D.exp_lot = {}
+    D.exp_range = {}
+    D.expiries = []
+    if os.path.exists(op_path):
+        oc = sqlite3.connect(op_path, timeout=30)
+        try:
+            ks = oc.execute("SELECT cid, expiry, otype, strike, lot FROM contracts WHERE instr=? AND expiry>=? AND expiry<=?",
+                            (inst, day_str(day0), day_str(day1 + 45))).fetchall()
+            lo_t, hi_t = day0 * 1440, (day1 + 1) * 1440
+            for n, (cid, ex_s, typ, stk, lot) in enumerate(ks, 1):
+                r = oc.execute("SELECT t,o,h,l,c FROM obars WHERE cid=? AND t>=? AND t<? ORDER BY t",
+                               (cid, lo_t, hi_t)).fetchall()
+                if not r:
+                    continue
+                b = np.array(r, dtype="int64")
+                ex = day_int(ex_s)
+                D.opt[(ex, str(typ), float(stk))] = (b[:, 0].copy(), b[:, 1] / 100.0, b[:, 2] / 100.0,
+                                                    b[:, 3] / 100.0, b[:, 4] / 100.0)
+                if lot:
+                    D.exp_lot[ex] = int(lot)
+                lo, hi = int(b[0, 0]), int(b[-1, 0])
+                if ex in D.exp_range:
+                    lo, hi = min(lo, D.exp_range[ex][0]), max(hi, D.exp_range[ex][1])
+                D.exp_range[ex] = (lo, hi)
+                if n % 300 == 0:
+                    log("  অপশন লোড: %d/%d" % (n, len(ks)))
+        finally:
+            oc.close()
+    _opt_finish(D, log)
+    return D
+
+
+def datasets_info(db_dir):
+    """gb.db / gb_opt.db-তে কোন ইনডেক্সের কতটা ডেটা আছে (UI-র তালিকার জন্য)"""
+    import sqlite3
+    out = {}
+    con = sqlite3.connect(os.path.join(db_dir, "gb.db"), timeout=30)
+    try:
+        for inst, t0, t1 in con.execute("SELECT instr, MIN(t), MAX(t) FROM bars GROUP BY instr"):
+            out[inst] = {"inst": inst, "name": INSTR_NAMES.get(inst, inst), "spot_from": day_str(t0 // 1440),
+                         "spot_to": day_str(t1 // 1440), "contracts": 0, "done": 0, "opt_from": "", "opt_to": ""}
+    finally:
+        con.close()
+    op = os.path.join(db_dir, "gb_opt.db")
+    if os.path.exists(op):
+        oc = sqlite3.connect(op, timeout=30)
+        try:
+            q = ("SELECT k.instr, COUNT(*), COALESCE(SUM(s.done),0), MIN(k.expiry), MAX(k.expiry) "
+                 "FROM contracts k LEFT JOIN ostate s ON s.cid=k.cid GROUP BY k.instr")
+            for inst, n, done, e0, e1 in oc.execute(q):
+                if inst in out:
+                    out[inst].update(contracts=n, done=int(done), opt_from=e0, opt_to=e1)
+        finally:
+            oc.close()
+    order = ["BN", "N50", "FIN", "SEN"]
+    return sorted(out.values(), key=lambda d: order.index(d["inst"]) if d["inst"] in order else 9)
+
+
+# =====================================================================
+#  চার্ট বার ও ইন্ডিকেটর
+# =====================================================================
+
+class Bars:
+    pass
+
+
+def get_bars(D, tf):
+    tf = int(tf)
+    if tf in D._bars:
+        return D._bars[tf]
+    key = D.day * 1000 + (D.mod - OPEN_MIN) // tf
+    ch = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    en = np.r_[ch[1:], len(key)]
+    B = Bars()
+    B.tf = tf
+    B.o = D.o[ch]
+    B.h = np.maximum.reduceat(D.h, ch)
+    B.l = np.minimum.reduceat(D.l, ch)
+    B.c = D.c[en - 1]
+    B.v = np.add.reduceat(D.v, ch)
+    B.t = D.t[ch]
+    B.e = B.t + tf
+    B.day = D.day[ch]
+    B.mod = D.mod[ch]
+    B.n = len(ch)
+    D._bars[tf] = B
+    return B
+
+
+def shift_arr(a, k):
+    k = int(k)
+    if k <= 0:
+        return a
+    out = np.full(len(a), np.nan)
+    if k < len(a):
+        out[k:] = a[:-k]
+    return out
+
+
+def price_src(X, name):
+    if name == "open":
+        return X.o
+    if name == "high":
+        return X.h
+    if name == "low":
+        return X.l
+    if name == "hl2":
+        return (X.h + X.l) / 2
+    if name == "hlc3":
+        return (X.h + X.l + X.c) / 3
+    if name == "ohlc4":
+        return (X.o + X.h + X.l + X.c) / 4
+    return X.c
+
+
+def wma_calc(x, n):
+    x = np.asarray(x, float)
+    out = np.full(len(x), np.nan)
+    n = int(n)
+    if n < 1 or len(x) < n:
+        return out
+    w = np.arange(1, n + 1, dtype=float)
+    win = np.lib.stride_tricks.sliding_window_view(x, n)
+    out[n - 1:] = win @ w / w.sum()
+    return out
+
+
+def ma_calc(x, typ, n):
+    n = max(int(n), 1)
+    s = pd.Series(x)
+    if typ == "ema":
+        return s.ewm(span=n, adjust=False, min_periods=n).mean().to_numpy()
+    if typ == "sma":
+        return s.rolling(n).mean().to_numpy()
+    if typ == "rma":
+        return s.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean().to_numpy()
+    if typ == "wma":
+        return wma_calc(x, n)
+    if typ == "hma":
+        raw = 2 * wma_calc(x, max(n // 2, 1)) - wma_calc(x, n)
+        return wma_calc(raw, max(int(round(math.sqrt(n))), 1))
+    raise ValueError("অজানা MA টাইপ: %s" % typ)
+
+
+def rma_arr(x, n):
+    return np.array(pd.Series(x).ewm(alpha=1.0 / max(int(n), 1), adjust=False, min_periods=int(n)).mean().to_numpy(), dtype=float)
+
+
+def rsi_calc(x, n):
+    s = pd.Series(x)
+    d = s.diff()
+    up = d.clip(lower=0)
+    dn = (-d).clip(lower=0)
+    ru = up.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean().to_numpy()
+    rd = dn.ewm(alpha=1.0 / n, adjust=False, min_periods=n).mean().to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r = 100 - 100 / (1 + ru / rd)
+    r = np.where((rd == 0) & (ru > 0), 100.0, r)
+    r = np.where((rd == 0) & (ru == 0), 50.0, r)
+    r[np.isnan(ru) | np.isnan(rd)] = np.nan
+    return r
+
+
+def tr_calc(h, l, c):
+    pc = shift_arr(c, 1)
+    tr = np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
+    tr[0] = h[0] - l[0]
+    return tr
+
+
+def dmi_calc(h, l, c, n, sm):
+    up = h - shift_arr(h, 1)
+    dn = shift_arr(l, 1) - l
+    up = np.nan_to_num(up)
+    dn = np.nan_to_num(dn)
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    mdm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    atr = rma_arr(tr_calc(h, l, c), n)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dip = 100 * rma_arr(pdm, n) / atr
+        dim = 100 * rma_arr(mdm, n) / atr
+        dx = 100 * np.abs(dip - dim) / (dip + dim)
+    adx = rma_arr(np.nan_to_num(dx, nan=0.0), sm)
+    adx[np.isnan(dip)] = np.nan
+    return adx, dip, dim
+
+
+def supertrend_calc(h, l, c, n, mult):
+    atr = rma_arr(tr_calc(h, l, c), n)
+    hl2 = (h + l) / 2
+    ub = hl2 + mult * atr
+    lb = hl2 - mult * atr
+    N = len(c)
+    st = np.full(N, np.nan)
+    di = np.full(N, np.nan)
+    fu = np.full(N, np.nan)
+    fl = np.full(N, np.nan)
+    d = 1
+    started = False
+    for i in range(N):
+        if np.isnan(atr[i]):
+            continue
+        if not started:
+            fu[i], fl[i] = ub[i], lb[i]
+            d = 1
+            started = True
+        else:
+            fl[i] = lb[i] if (lb[i] > fl[i - 1] or c[i - 1] < fl[i - 1]) else fl[i - 1]
+            fu[i] = ub[i] if (ub[i] < fu[i - 1] or c[i - 1] > fu[i - 1]) else fu[i - 1]
+            if d == 1 and c[i] < fl[i]:
+                d = -1
+            elif d == -1 and c[i] > fu[i]:
+                d = 1
+        st[i] = fl[i] if d == 1 else fu[i]
+        di[i] = d
+    return st, di
+
+
+def tf_apply(D, B, tf_ind, fn):
+    """ইন্ডিকেটর অন্য টাইমফ্রেমে গণনা করে চার্ট বারে বসায় (শুধু সম্পূর্ণ হওয়া HTF বার, রিপেইন্ট নেই)"""
+    tf_ind = int(tf_ind or 0)
+    if tf_ind <= B.tf:
+        return fn(B)
+    H = get_bars(D, tf_ind)
+    res = fn(H)
+    pos = np.searchsorted(H.e, B.e, side="right") - 1
+    ok = pos >= 0
+    out = {}
+    for k, a in res.items():
+        m = np.full(B.n, np.nan)
+        m[ok] = a[pos[ok]]
+        out[k] = m
+    return out
+
+
+SOURCES = [
+    ("close", "Close", "দাম"), ("open", "Open", "দাম"), ("high", "High", "দাম"), ("low", "Low", "দাম"),
+    ("body", "Candle Body (পয়েন্ট)", "ক্যান্ডেল"), ("bodyp", "Body % (রেঞ্জের)", "ক্যান্ডেল"),
+    ("rng", "Candle Range (High-Low)", "ক্যান্ডেল"), ("uw", "Upper Wick (পয়েন্ট)", "ক্যান্ডেল"),
+    ("lw", "Lower Wick (পয়েন্ট)", "ক্যান্ডেল"), ("uwp", "Upper Wick % (রেঞ্জের)", "ক্যান্ডেল"),
+    ("lwp", "Lower Wick % (রেঞ্জের)", "ক্যান্ডেল"), ("cdir", "Candle রং (+1 সবুজ / -1 লাল)", "ক্যান্ডেল"),
+    ("bodyatr", "Body ÷ ATR", "ক্যান্ডেল"),
+    ("hl2", "HL2", "দাম"), ("hlc3", "HLC3 (Typical)", "দাম"), ("ohlc4", "OHLC4", "দাম"),
+    ("number", "— সংখ্যা (Number) —", "মান"),
+    ("volume", "Volume", "ভলিউম"), ("volsma", "Volume SMA", "ভলিউম"),
+    ("minsopen", "Minutes Since Open (9:15 থেকে)", "সময়"),
+    ("ma1", "MA 1", "ইন্ডিকেটর"), ("ma2", "MA 2", "ইন্ডিকেটর"), ("ma3", "MA 3", "ইন্ডিকেটর"),
+    ("rsi", "RSI", "ইন্ডিকেটর"), ("adx", "ADX", "ইন্ডিকেটর"), ("dip", "DI+", "ইন্ডিকেটর"), ("dim", "DI-", "ইন্ডিকেটর"),
+    ("atr", "ATR", "ইন্ডিকেটর"),
+    ("st1", "Supertrend 1", "ইন্ডিকেটর"), ("st1dir", "Supertrend 1 Dir (+1 উপরে / -1 নিচে)", "ইন্ডিকেটর"),
+    ("st2", "Supertrend 2", "ইন্ডিকেটর"), ("st2dir", "Supertrend 2 Dir (+1 / -1)", "ইন্ডিকেটর"),
+    ("macd_l", "MACD Line", "ইন্ডিকেটর"), ("macd_s", "MACD Signal", "ইন্ডিকেটর"), ("macd_h", "MACD Histogram", "ইন্ডিকেটর"),
+    ("vwap", "VWAP (দিনের শুরু থেকে)", "ইন্ডিকেটর"),
+    ("bbup", "BB Upper", "ইন্ডিকেটর"), ("bbmid", "BB Middle", "ইন্ডিকেটর"), ("bblow", "BB Lower", "ইন্ডিকেটর"),
+    ("bbw", "BB Width %", "ইন্ডিকেটর"),
+    ("donhi", "Highest High (আগের N বার)", "ইন্ডিকেটর"), ("donlo", "Lowest Low (আগের N বার)", "ইন্ডিকেটর"),
+    ("orbh", "ORB High", "ORB / দিন"), ("orbl", "ORB Low", "ORB / দিন"), ("orbm", "ORB Mid", "ORB / দিন"),
+    ("orbr", "ORB Range (High-Low)", "ORB / দিন"),
+    ("dayo", "Day Open", "ORB / দিন"), ("dayh", "Day High (এ পর্যন্ত)", "ORB / দিন"), ("dayl", "Day Low (এ পর্যন্ত)", "ORB / দিন"),
+    ("pdh", "Prev Day High", "আগের দিন"), ("pdl", "Prev Day Low", "আগের দিন"), ("pdc", "Prev Day Close", "আগের দিন"),
+    ("gap", "Gap % (Day Open vs Prev Close)", "আগের দিন"),
+    ("pivp", "Pivot P", "Pivot / CPR"), ("r1", "Pivot R1", "Pivot / CPR"), ("r2", "Pivot R2", "Pivot / CPR"),
+    ("r3", "Pivot R3", "Pivot / CPR"), ("s1", "Pivot S1", "Pivot / CPR"), ("s2", "Pivot S2", "Pivot / CPR"),
+    ("s3", "Pivot S3", "Pivot / CPR"),
+    ("cprt", "CPR Top", "Pivot / CPR"), ("cprb", "CPR Bottom", "Pivot / CPR"), ("cprw", "CPR Width %", "Pivot / CPR"),
+]
+SRC_IDS = {s[0] for s in SOURCES}
+OPS = [("cross_above", "Crosses Above"), ("cross_below", "Crosses Below"), ("above", "Is Above"),
+       ("below", "Is Below"), ("rising", "Is Rising"), ("falling", "Is Falling")]
+
+
+def compute_sources(D, tf, ind):
+    key = json.dumps([tf, ind], sort_keys=True)
+    if key in D._cache:
+        return D._cache[key]
+    B = get_bars(D, tf)
+    n = B.n
+    S = {"close": B.c, "open": B.o, "high": B.h, "low": B.l, "hl2": (B.h + B.l) / 2,
+         "hlc3": (B.h + B.l + B.c) / 3, "ohlc4": (B.o + B.h + B.l + B.c) / 4, "volume": B.v,
+         "minsopen": (B.mod - OPEN_MIN).astype(float)}
+    rng_ = B.h - B.l
+    top_, bot_ = np.maximum(B.o, B.c), np.minimum(B.o, B.c)
+    safe_ = np.where(rng_ > 0, rng_, np.nan)
+    S["body"], S["rng"], S["uw"], S["lw"] = np.abs(B.c - B.o), rng_, B.h - top_, bot_ - B.l
+    S["bodyp"] = np.nan_to_num(S["body"] / safe_ * 100)
+    S["uwp"] = np.nan_to_num(S["uw"] / safe_ * 100)
+    S["lwp"] = np.nan_to_num(S["lw"] / safe_ * 100)
+    S["cdir"] = np.sign(B.c - B.o)
+    S["volsma"] = pd.Series(B.v).rolling(max(int(ind["vol"]["len"]), 1)).mean().to_numpy()
+
+    for k in ("ma1", "ma2", "ma3"):
+        p = ind[k]
+        S[k] = tf_apply(D, B, p["tf"], lambda X, p=p: {"v": ma_calc(price_src(X, p["src"]), p["type"], p["len"])})["v"]
+    p = ind["rsi"]
+    S["rsi"] = tf_apply(D, B, p["tf"], lambda X: {"v": rsi_calc(price_src(X, p["src"]), int(p["len"]))})["v"]
+    p = ind["adx"]
+    r = tf_apply(D, B, p["tf"], lambda X: dict(zip(("adx", "dip", "dim"), dmi_calc(X.h, X.l, X.c, int(p["len"]), int(p["smooth"])))))
+    S["adx"], S["dip"], S["dim"] = r["adx"], r["dip"], r["dim"]
+    p = ind["atr"]
+    S["atr"] = tf_apply(D, B, p["tf"], lambda X: {"v": rma_arr(tr_calc(X.h, X.l, X.c), int(p["len"]))})["v"]
+    with np.errstate(all="ignore"):
+        S["bodyatr"] = S["body"] / S["atr"]
+    for k in ("st1", "st2"):
+        p = ind[k]
+        r = tf_apply(D, B, p["tf"], lambda X, p=p: dict(zip(("st", "dir"), supertrend_calc(X.h, X.l, X.c, int(p["len"]), float(p["mult"])))))
+        S[k], S[k + "dir"] = r["st"], r["dir"]
+    p = ind["macd"]
+
+    def _macd(X):
+        c = pd.Series(X.c)
+        m = c.ewm(span=int(p["fast"]), adjust=False).mean() - c.ewm(span=int(p["slow"]), adjust=False).mean()
+        s = m.ewm(span=int(p["sig"]), adjust=False).mean()
+        return {"l": m.to_numpy(), "s": s.to_numpy(), "h": (m - s).to_numpy()}
+    r = tf_apply(D, B, p["tf"], _macd)
+    S["macd_l"], S["macd_s"], S["macd_h"] = r["l"], r["s"], r["h"]
+    p = ind["bb"]
+
+    def _bb(X):
+        s = pd.Series(price_src(X, p["src"]))
+        mid = s.rolling(int(p["len"])).mean()
+        sd = s.rolling(int(p["len"])).std(ddof=0)
+        up, lo = mid + float(p["mult"]) * sd, mid - float(p["mult"]) * sd
+        with np.errstate(divide="ignore", invalid="ignore"):
+            w = ((up - lo) / mid * 100)
+        return {"up": up.to_numpy(), "mid": mid.to_numpy(), "low": lo.to_numpy(), "w": w.to_numpy()}
+    r = tf_apply(D, B, p["tf"], _bb)
+    S["bbup"], S["bbmid"], S["bblow"], S["bbw"] = r["up"], r["mid"], r["low"], r["w"]
+    nn = max(int(ind["don"]["n"]), 1)
+    S["donhi"] = pd.Series(B.h).rolling(nn).max().shift(1).to_numpy()
+    S["donlo"] = pd.Series(B.l).rolling(nn).min().shift(1).to_numpy()
+
+    # VWAP (ইনডেক্সে ভলিউম না থাকলে টাইপিক্যাল প্রাইসের গড়)
+    tp = (B.h + B.l + B.c) / 3
+    df = pd.DataFrame({"d": B.day, "pv": tp * B.v, "v": B.v, "tp": tp})
+    g = df.groupby("d")
+    cv, cpv = g["v"].cumsum().to_numpy(), g["pv"].cumsum().to_numpy()
+    cnt, ctp = (g.cumcount() + 1).to_numpy(), g["tp"].cumsum().to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        S["vwap"] = np.where(cv > 0, cpv / np.where(cv > 0, cv, 1), ctp / cnt)
+
+    # দিনের লেভেল
+    S["dayo"] = pd.Series(B.o).groupby(B.day).transform("first").to_numpy()
+    S["dayh"] = pd.Series(B.h).groupby(B.day).cummax().to_numpy()
+    S["dayl"] = pd.Series(B.l).groupby(B.day).cummin().to_numpy()
+    dpos = np.searchsorted(D.du, B.day)
+    pH = np.r_[np.nan, D.dH[:-1]][dpos]
+    pL = np.r_[np.nan, D.dL[:-1]][dpos]
+    pC = np.r_[np.nan, D.dC[:-1]][dpos]
+    S["pdh"], S["pdl"], S["pdc"] = pH, pL, pC
+    with np.errstate(divide="ignore", invalid="ignore"):
+        S["gap"] = (S["dayo"] - pC) / pC * 100
+        P = (pH + pL + pC) / 3
+        S["pivp"] = P
+        S["r1"], S["s1"] = 2 * P - pL, 2 * P - pH
+        S["r2"], S["s2"] = P + (pH - pL), P - (pH - pL)
+        S["r3"], S["s3"] = pH + 2 * (P - pL), pL - 2 * (pH - P)
+        bc = (pH + pL) / 2
+        tc = 2 * P - bc
+        S["cprt"], S["cprb"] = np.maximum(tc, bc), np.minimum(tc, bc)
+        S["cprw"] = (S["cprt"] - S["cprb"]) / P * 100
+
+    # ORB
+    mins = int(ind["orb"]["mins"])
+    m = D.mod < OPEN_MIN + mins
+    if m.any():
+        odf = pd.DataFrame({"d": D.day[m], "h": D.h[m], "l": D.l[m]}).groupby("d").agg(h=("h", "max"), l=("l", "min"))
+        orh = pd.Series(B.day).map(odf["h"]).to_numpy(float)
+        orl = pd.Series(B.day).map(odf["l"]).to_numpy(float)
+    else:
+        orh = np.full(n, np.nan)
+        orl = np.full(n, np.nan)
+    valid = B.mod >= OPEN_MIN + mins
+    orh = np.where(valid, orh, np.nan)
+    orl = np.where(valid, orl, np.nan)
+    S["orbh"], S["orbl"], S["orbm"], S["orbr"] = orh, orl, (orh + orl) / 2, orh - orl
+
+    if len(D._cache) >= 6:
+        D._cache.pop(next(iter(D._cache)))
+    D._cache[key] = (S, B)
+    return S, B
+
+
+# =====================================================================
+#  কন্ডিশন
+# =====================================================================
+
+def eval_slot(S, sl, n):
+    l, r = sl["l"], sl["r"]
+    if l not in S:
+        raise ValueError("অজানা বাম সোর্স: %s" % l)
+    lv = shift_arr(S[l], sl.get("ls", 0))
+    if r == "number":
+        rv = np.full(n, float(sl.get("num", 0)))
+    else:
+        if r not in S:
+            raise ValueError("অজানা ডান সোর্স: %s" % r)
+        rv = shift_arr(S[r], sl.get("rs", 0)) * float(sl.get("mul", 1))
+    op = sl["op"]
+    with np.errstate(invalid="ignore"):
+        if op == "above":
+            return lv > rv
+        if op == "below":
+            return lv < rv
+        lp = shift_arr(lv, 1)
+        if op == "rising":
+            return lv > lp
+        if op == "falling":
+            return lv < lp
+        rp = shift_arr(rv, 1)
+        rp = np.where(np.isnan(rp), rv, rp)     # লেভেল সবে তৈরি হলে (যেমন ORB) আগের মান = বর্তমান ধরা হয়
+        if op == "cross_above":
+            return (lv > rv) & (lp <= rp)
+        if op == "cross_below":
+            return (lv < rv) & (lp >= rp)
+    raise ValueError("অজানা অপারেটর: %s" % op)
+
+
+def eval_cond(S, slots, n):
+    acc = None
+    for sl in slots:
+        if not sl.get("on", True):
+            continue
+        v = eval_slot(S, sl, n)
+        if acc is None:
+            acc = v
+        elif sl.get("join", "AND") == "OR":
+            acc = acc | v
+        else:
+            acc = acc & v
+    return acc
+
+
+# =====================================================================
+#  ডিফল্ট সেটিংস
+# =====================================================================
+
+def slot(l="close", op="above", r="number", num=0.0, ls=0, rs=0, mul=1.0, join="AND", on=True):
+    return {"on": on, "join": join, "l": l, "ls": ls, "op": op, "r": r, "rs": rs, "mul": mul, "num": num}
+
+
+def default_case(i=1):
+    return {
+        "name": "Case %d" % i, "on": True, "action": "BUY", "opt": "CE",
+        "strike": {"mode": "offset", "off": 0, "prem": 300, "band": 30},
+        "entry": [slot("close", "cross_above", "orbh"), slot("rsi", "above", "number", 55),
+                  slot("close", "above", "vwap")],
+        "exit": [slot("close", "cross_below", "orbm", join="OR")],
+        "sl": {"mode": "pct", "val": 20}, "tp": {"mode": "pct", "val": 40},
+        "trail": {"mode": "none", "val": 15, "act": 0, "trig": 10, "move": 5, "unit": "pct"}, "be": {"on": False, "val": 20},
+        "time_stop": 0,
+        "tg": {"on": False, "unit": "pct", "t1": {"val": 20, "qty": 50}, "t2": {"on": False, "val": 40, "qty": 25},
+               "a1": {"mode": "be", "val": 5}, "a2": {"mode": "t1"}},
+    }
+
+
+def default_settings():
+    return {
+        "general": {
+            "tf": (5 if 5 % BASE_TF == 0 else BASE_TF), "from": "", "to": "", "lots": 1, "capital": 100000,
+            "win_from": "09:20", "win_to": "14:30", "sqoff": "15:15",
+            "max_trades": 3, "day_loss": 0, "day_profit": 0,
+            "fresh": True, "min_dte": 0, "skip_expiry_day": False,
+            "brokerage": 20, "slip": 0.5, "charges_pct": 0.15,
+            "sl_first": True, "split": 0, "chart": "spot",
+        },
+        "ind": {
+            "ma1": {"type": "ema", "len": 5, "tf": 0, "src": "close"},
+            "ma2": {"type": "ema", "len": 20, "tf": 0, "src": "close"},
+            "ma3": {"type": "ema", "len": 50, "tf": 0, "src": "close"},
+            "rsi": {"len": 14, "tf": 0, "src": "close"},
+            "adx": {"len": 14, "smooth": 14, "tf": 0},
+            "atr": {"len": 14, "tf": 0},
+            "st1": {"len": 10, "mult": 1.0, "tf": 0},
+            "st2": {"len": 10, "mult": 3.0, "tf": 0},
+            "macd": {"fast": 12, "slow": 26, "sig": 9, "tf": 0},
+            "bb": {"len": 20, "mult": 2.0, "src": "close", "tf": 0},
+            "vol": {"len": 20},
+            "don": {"n": 20},
+            "orb": {"mins": 15},
+        },
+        "cases": [default_case(1)],
+    }
+
+
+def deep_merge(base, inc):
+    out = copy.deepcopy(base)
+    if not isinstance(inc, dict):
+        return out
+    for k, v in inc.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = copy.deepcopy(v)
+    return out
+
+
+def norm_settings(inp):
+    d = default_settings()
+    st = {"general": deep_merge(d["general"], (inp or {}).get("general", {})),
+          "ind": deep_merge(d["ind"], (inp or {}).get("ind", {}))}
+    cases = (inp or {}).get("cases")
+    if cases is None:
+        cases = d["cases"]
+    st["cases"] = []
+    for i, c in enumerate(cases):
+        dc = default_case(i + 1)
+        m = deep_merge({k: v for k, v in dc.items() if k not in ("entry", "exit")}, {k: v for k, v in c.items() if k not in ("entry", "exit")})
+        for part in ("entry", "exit"):
+            m[part] = [deep_merge(slot(), s) for s in c.get(part, dc[part])]
+        st["cases"].append(m)
+    G = st["general"]
+    for k in ("tf", "lots", "max_trades", "min_dte", "split"):
+        G[k] = int(float(G[k]))
+    for k in ("capital", "day_loss", "day_profit", "brokerage", "slip", "charges_pct"):
+        G[k] = float(G[k])
+    if G["tf"] % BASE_TF != 0 or G["tf"] < BASE_TF:
+        raise ValueError("চার্ট TF %d মিনিটের গুণিতক হতে হবে (ডেটার ক্যান্ডেল %d মিনিট)" % (BASE_TF, BASE_TF))
+    for c in st["cases"]:
+        tg = c["tg"]
+        tg["on"] = bool(tg.get("on"))
+        if tg.get("unit") not in ("pct", "pts", "rr"):
+            tg["unit"] = "pct"
+        for k in ("t1", "t2"):
+            tg[k]["val"] = float(tg[k].get("val", 0) or 0)
+            tg[k]["qty"] = min(max(float(tg[k].get("qty", 0) or 0), 1.0), 99.0)
+        tg["t2"]["on"] = bool(tg["t2"].get("on"))
+        if tg["on"] and tg["t1"]["val"] <= 0:
+            raise ValueError("%s: Target 1-এর মান ০-র বেশি হতে হবে" % c["name"])
+        if tg["on"] and tg["t2"]["on"] and tg["t2"]["val"] <= tg["t1"]["val"]:
+            raise ValueError("%s: Target 2 অবশ্যই Target 1-এর চেয়ে বড় হতে হবে" % c["name"])
+        tg["a1"]["val"] = float(tg["a1"].get("val", 0) or 0)
+        if tg["a1"].get("mode") not in ("none", "be", "lock"):
+            tg["a1"]["mode"] = "be"
+        if tg["a2"].get("mode") not in ("none", "t1", "be"):
+            tg["a2"]["mode"] = "t1"
+        for part in ("entry", "exit"):
+            for s in c[part]:
+                if s["l"] not in SRC_IDS or s["l"] == "number":
+                    raise ValueError("%s: বাম সোর্স ঠিক নেই (%s)" % (c["name"], s["l"]))
+                if s["r"] not in SRC_IDS:
+                    raise ValueError("%s: ডান সোর্স ঠিক নেই (%s)" % (c["name"], s["r"]))
+                for k in ("ls", "rs"):
+                    s[k] = max(int(float(s.get(k, 0))), 0)
+                s["mul"] = float(s["mul"])
+                s["num"] = float(s["num"])
+    return st
+
+
+# =====================================================================
+#  পরিসংখ্যান
+# =====================================================================
+
+def calc_stats(trs, capital):
+    n = len(trs)
+    z = dict(n=0, win=0.0, net=0.0, gross=0.0, costs=0.0, pf=0.0, exp=0.0, avg_w=0.0, avg_l=0.0,
+             dd=0.0, dd_pct=0.0, mcl=0, mcw=0, best=0.0, worst=0.0, rr=0.0, rec=0.0, hold=0.0,
+             avg_r=None, pm=0.0, nm=0, dd_len=0)
+    if n == 0:
+        return z
+    pn = np.array([t["net"] for t in trs], float)
+    wins, loss = pn[pn > 0], pn[pn <= 0]
+    lsum = abs(loss.sum())
+    pf = (wins.sum() / lsum) if lsum > 0 else (99.0 if wins.sum() > 0 else 0.0)
+    eq = np.cumsum(pn)
+    peaks = np.maximum.accumulate(np.r_[0.0, eq])[1:]
+    ddv = eq - peaks
+    dd = float(ddv.min())
+    mcl = mcw = cur = cw = 0
+    for x in pn:
+        cur = cur + 1 if x <= 0 else 0
+        cw = cw + 1 if x > 0 else 0
+        mcl, mcw = max(mcl, cur), max(mcw, cw)
+    dl = best_dl = 0
+    for x in ddv:
+        dl = dl + 1 if x < 0 else 0
+        best_dl = max(best_dl, dl)
+    aw = float(wins.mean()) if len(wins) else 0.0
+    al = float(loss.mean()) if len(loss) else 0.0
+    rs = [t["r"] for t in trs if t.get("r") is not None]
+    mon = {}
+    for t in trs:
+        mon[t["date"][:7]] = mon.get(t["date"][:7], 0.0) + t["net"]
+    pm = 100.0 * sum(1 for v in mon.values() if v > 0) / len(mon)
+    net = float(pn.sum())
+    return dict(n=n, win=float(100 * (pn > 0).mean()), net=net,
+                gross=float(sum(t["gross"] for t in trs)), costs=float(sum(t["costs"] for t in trs)),
+                pf=float(min(pf, 99.0)), exp=float(pn.mean()), avg_w=aw, avg_l=al,
+                dd=dd, dd_pct=float(100 * dd / capital) if capital else 0.0, mcl=int(mcl), mcw=int(mcw),
+                best=float(pn.max()), worst=float(pn.min()),
+                rr=float(aw / abs(al)) if al < 0 else 0.0, rec=float(net / abs(dd)) if dd < 0 else 0.0,
+                hold=float(np.mean([t.get("hold", 0) for t in trs])),
+                avg_r=float(np.mean(rs)) if rs else None, pm=float(pm), nm=len(mon), dd_len=int(best_dl))
+
+
+def _pctl(a, q):
+    return float(np.percentile(a, q)) if len(a) else 0.0
+
+
+DOWN = ["সোম", "মঙ্গল", "বুধ", "বৃহ", "শুক্র", "শনি", "রবি"]
+
+
+def analyze(trades, cap, base):
+    """ট্রেড তালিকা থেকে বিস্তারিত বিশ্লেষণ: টাইমিং, DD, RR, MAE/MFE, SL/TP what-if"""
+    if not trades:
+        return {}
+    out = {}
+
+    def grp(keyf, order=None):
+        g = {}
+        for t in trades:
+            g.setdefault(keyf(t), []).append(t)
+        ks = order if order else sorted(g)
+        return [dict(k=k, **calc_stats(g[k], cap)) for k in ks if k in g]
+
+    def mins(t):
+        return int(t["in"][:2]) * 60 + int(t["in"][3:5])
+
+    def slotk(t):
+        m = mins(t)
+        b = (m - OPEN_MIN) // 30 * 30 + OPEN_MIN
+        return "%s-%s" % (hm_str(b), hm_str(b + 30))
+
+    def bucket(v, edges, labels):
+        for e, l in zip(edges, labels):
+            if v <= e:
+                return l
+        return labels[-1]
+
+    out["by_slot"] = grp(slotk)
+    out["by_dow"] = grp(lambda t: t["dow"], DOWN)
+    out["by_reason"] = grp(lambda t: t["reason"])
+    out["by_case"] = grp(lambda t: t["case"])
+    out["by_type"] = grp(lambda t: t["side"].split()[1])
+    dl = ["০ দিন (এক্সপায়ারি দিন)", "১ দিন", "২ দিন", "৩-৫ দিন", "৬-১০ দিন", "১১-২০ দিন", "২১+ দিন"]
+    out["by_dte"] = grp(lambda t: bucket(t["dte"], [0, 1, 2, 5, 10, 20], dl), dl)
+    hl = ["≤৯ মিনিট", "১০-১৯ মিনিট", "২০-৩৯ মিনিট", "৪০-৫৯ মিনিট", "১-২ ঘণ্টা", "২ ঘণ্টার বেশি"]
+    out["by_hold"] = grp(lambda t: bucket(t["hold"], [9, 19, 39, 59, 120], hl), hl)
+    pl = ["<১০০", "১০০-২৫০", "২৫০-৪০০", "৪০০-৭০০", "৭০০-১০০০", "১০০০+"]
+    out["by_prem"] = grp(lambda t: bucket(t["entry"], [100, 250, 400, 700, 1000], pl), pl)
+
+    # ড্রডাউন
+    pn = np.array([t["net"] for t in trades], float)
+    eq = np.cumsum(pn)
+    pk = np.maximum.accumulate(np.r_[0.0, eq])[1:]
+    dd = eq - pk
+    k = int(np.argmin(dd))
+    pi = int(np.argmax(eq[:k + 1] == pk[k])) if dd[k] < 0 else 0
+    rec = None
+    for j in range(k + 1, len(eq)):
+        if eq[j] >= pk[k]:
+            rec = j
+            break
+    out["dd"] = [round(float(x), 1) for x in dd]
+    out["dd_info"] = {"max": float(dd[k]), "pct": float(100 * dd[k] / cap) if cap else 0.0,
+                      "peak_date": trades[pi]["date"] if dd[k] < 0 else None, "trough_date": trades[k]["date"],
+                      "rec_date": trades[rec]["date"] if rec is not None else None,
+                      "trades_in_dd": int(k - pi), "recovered": rec is not None}
+    # দিন অনুযায়ী
+    dm = {}
+    for t in trades:
+        dm[t["date"]] = dm.get(t["date"], 0.0) + t["net"]
+    dv = [dm[d] for d in sorted(dm)]
+    cl = mx = 0
+    for x in dv:
+        cl = cl + 1 if x <= 0 else 0
+        mx = max(mx, cl)
+    out["days"] = {"n": len(dv), "win": float(100 * np.mean([x > 0 for x in dv])), "best": float(max(dv)),
+                   "worst": float(min(dv)), "avg": float(np.mean(dv)), "mcl": int(mx),
+                   "tpd": float(len(trades) / len(dv))}
+    # MAE / MFE
+    mae = np.array([t["mae"] for t in trades], float)
+    mfe = np.array([t["mfe"] for t in trades], float)
+    ret = np.array([t["ret"] for t in trades], float)
+    w = pn > 0
+    gb = (mfe - ret)[w]
+    out["exc"] = {
+        "mae_w": [_pctl(mae[w], q) for q in (50, 75, 90, 100)],
+        "mae_l": [_pctl(mae[~w], q) for q in (50, 75, 90, 100)],
+        "mfe_w": [_pctl(mfe[w], q) for q in (25, 50, 75, 90)],
+        "mfe_l": [_pctl(mfe[~w], q) for q in (25, 50, 75, 90)],
+        "give_med": _pctl(gb, 50), "give_avg": float(gb.mean()) if len(gb) else 0.0,
+        "l_touch": {str(x): float(100 * np.mean(mfe[~w] >= x)) if (~w).any() else 0.0 for x in (5, 10, 20, 30)},
+        "nw": int(w.sum()), "nl": int((~w).sum())}
+    # SL / TP what-if (আনুমানিক)
+    ent = np.array([t["entry"] for t in trades], float)
+    qty = np.array([t["qty"] for t in trades], float)
+    cst = np.array([t["costs"] for t in trades], float)
+
+    def sim(sl, tp):
+        pct = ret.copy()
+        if tp:
+            pct = np.where(mfe >= tp, tp, pct)
+        if sl:
+            pct = np.where(mae >= sl, -sl, pct)
+        pnl = pct / 100.0 * ent * qty - cst
+        g, l = pnl[pnl > 0].sum(), -pnl[pnl <= 0].sum()
+        return dict(net=float(pnl.sum()), pf=float(min(g / l, 99.0)) if l > 0 else 99.0,
+                    win=float(100 * np.mean(pnl > 0)),
+                    cut=int(np.sum(mae >= sl)) if sl else 0)
+    SLS = [5, 8, 10, 12, 15, 20, 25, 30, 40]
+    TPS = [10, 15, 20, 30, 40, 50, 75, 100]
+    out["whatif"] = {"now": sim(0, 0),
+                     "sl": [dict(v=x, **sim(x, 0)) for x in SLS],
+                     "tp": [dict(v=x, **sim(0, x)) for x in TPS],
+                     "grid": {"sls": SLS, "tps": TPS, "net": [[round(sim(a, b)["net"]) for b in TPS] for a in SLS]}}
+    return out
+
+
+# =====================================================================
+#  ব্যাকটেস্ট ইঞ্জিন
+# =====================================================================
+
+
+def contract_view(D, ct):
+    """একটা অপশন কন্ট্র্যাক্টের নিজের প্রিমিয়াম চার্টকে স্পটের মতো ডেটা-অবজেক্ট বানায়"""
+    t, o, h, l, c = ct
+    mod = t % 1440
+    m = (mod >= OPEN_MIN) & (mod <= OPEN_MIN + 374)
+    V = Data()
+    V._bars, V._cache = {}, {}
+    V.t, V.o, V.h, V.l, V.c = t[m], o[m], h[m], l[m], c[m]
+    V.v = np.zeros(len(V.t))
+    V.day, V.mod = V.t // 1440, V.t % 1440
+    if len(V.t) == 0:
+        return V
+    V.du = np.unique(V.day)
+    st = np.flatnonzero(np.r_[True, V.day[1:] != V.day[:-1]])
+    en = np.r_[st[1:], len(V.day)]
+    V.dO, V.dH = V.o[st], np.maximum.reduceat(V.h, st)
+    V.dL, V.dC = np.minimum.reduceat(V.l, st), V.c[en - 1]
+    return V
+
+
+def prem_signals(D, st, exset):
+    """প্রতিটা কন্ট্র্যাক্টের প্রিমিয়াম চার্টে সিগন্যাল/এক্সিট সময় বের করে (ছোট অ্যারে হিসেবে ক্যাশ হয়)"""
+    G = st["general"]
+    ck = json.dumps([G["tf"], G["fresh"], G["win_from"], G["win_to"], st["ind"],
+                     [[c["opt"], c["on"], c["entry"], c["exit"]] for c in st["cases"]]], sort_keys=True)
+    pc = D.__dict__.setdefault("_pc", {})
+    store = pc.setdefault(ck, {})
+    if len(pc) > 3:
+        pc.pop(next(iter(pc)))
+    w0, w1 = hm(G["win_from"]), hm(G["win_to"])
+    for (ex, typ, stk), ct in D.opt.items():
+        if ex not in exset or (ex, typ, stk) in store:
+            continue
+        res = {}
+        V = contract_view(D, ct)
+        if len(V.t) > 5:
+            S, B = compute_sources(V, G["tf"], st["ind"])
+            emod = B.e % 1440
+            wm = (emod >= w0) & (emod <= w1)
+            first = np.r_[True, B.day[1:] != B.day[:-1]]
+            for ci, cs in enumerate(st["cases"]):
+                if not cs["on"] or cs["opt"] != typ:
+                    continue
+                ent = eval_cond(S, cs["entry"], B.n)
+                if ent is None:
+                    continue
+                if G["fresh"]:
+                    prev = np.r_[False, ent[:-1]]
+                    prev[first] = False
+                    ent = ent & ~prev
+                ent = ent & wm
+                xx = eval_cond(S, cs["exit"], B.n)
+                res[ci] = (B.e[ent], B.c[ent], B.e[xx] if xx is not None else np.zeros(0, "int64"))
+        V._cache.clear()
+        store[(ex, typ, stk)] = res
+    return store
+
+
+def backtest(D, raw, light=False, progress=None):
+    st = norm_settings(raw)
+    G = st["general"]
+    PM = G.get("chart") == "prem"
+    S, B = compute_sources(D, G["tf"], st["ind"])
+    n = B.n
+    w0, w1, sq = hm(G["win_from"]), hm(G["win_to"]), hm(G["sqoff"])
+    emod = B.e % 1440
+    wmask = (emod >= w0) & (emod <= w1)
+    first_of_day = np.r_[True, B.day[1:] != B.day[:-1]]
+
+    cases = []
+    for ci, cs in enumerate(st["cases"]):
+        if not cs["on"] or PM:
+            continue
+        ent = eval_cond(S, cs["entry"], n)
+        if ent is None:
+            continue
+        if G["fresh"]:
+            prev = np.r_[False, ent[:-1]]
+            prev[first_of_day] = False
+            sig = ent & ~prev
+        else:
+            sig = ent
+        ex = eval_cond(S, cs["exit"], n)
+        xs = set(B.e[ex].tolist()) if ex is not None else set()
+        cases.append((ci, cs, sig & wmask, xs))
+
+    d_from = day_int(G["from"]) if G["from"] else -10 ** 9
+    d_to = day_int(G["to"]) if G["to"] else 10 ** 9
+    exps = D.expiries
+    eligible = []
+    for d in D.du.tolist():
+        if d < d_from or d > d_to:
+            continue
+        k = bisect.bisect_left(exps, d + G["min_dte"])
+        if k >= len(exps):
+            continue
+        ex = exps[k]
+        if G["skip_expiry_day"] and ex == d:
+            continue
+        lo, hi = D.exp_range[ex]
+        if lo <= d * 1440 + 1439 and hi >= d * 1440:
+            eligible.append((d, ex))
+
+    PS = prem_signals(D, st, {ex for _, ex in eligible}) if PM else None
+    pcases = [(ci, cs) for ci, cs in enumerate(st["cases"]) if cs["on"]] if PM else []
+    skipped = {"ডেটা নেই (কন্ট্র্যাক্টে বার নেই)": 0, "স্ট্রাইক পাওয়া যায়নি": 0}
+    trades = []
+    slip = G["slip"]
+    sl_first = bool(G["sl_first"])
+
+    def locate(ex, typ, stk, te):
+        ct = D.opt.get((ex, typ, float(stk)))
+        if ct is None:
+            return None
+        j = int(np.searchsorted(ct[0], te))
+        if j < len(ct[0]) and ct[0][j] == te:
+            return ct, j
+        return None
+
+    def pick(cs, ex, te, spot_ref):
+        typ = cs["opt"]
+        stk = D.strikes.get((ex, typ))
+        if stk is None:
+            return None
+        sm = cs["strike"]
+        if sm["mode"] == "prem":
+            X = float(sm["prem"])
+            best = None
+            for s_ in stk:
+                r = locate(ex, typ, s_, te)
+                if r is None:
+                    continue
+                pr = r[0][1][r[1]]
+                if pr <= 0:
+                    continue
+                diff = abs(pr - X)
+                if best is None or diff < best[0]:
+                    best = (diff, r[0], r[1], float(s_))
+            return None if best is None else (best[1], best[2], best[3])
+        atm = int(np.argmin(np.abs(stk - spot_ref)))
+        off = int(float(sm["off"]))
+        k = atm + (off if typ == "CE" else -off)
+        if k < 0 or k >= len(stk):
+            return "nostrike"
+        s_ = float(stk[k])
+        r = locate(ex, typ, s_, te)
+        if r is None:
+            return None
+        return (r[0], r[1], s_)
+
+    def run_trade(cs, xs, ct, j, te, day_end, lot):
+        t, o, h, l, c = ct
+        side = 1 if cs["action"] == "BUY" else -1
+        raw_e = float(o[j])
+        sl = tp = None
+        sm, sv = cs["sl"]["mode"], float(cs["sl"]["val"])
+        if sm == "pct":
+            sl = raw_e * (1 - side * sv / 100)
+        elif sm == "pts":
+            sl = raw_e - side * sv
+        sl0 = sl
+        tm, tv = cs["tp"]["mode"], float(cs["tp"]["val"])
+        if tm == "pct":
+            tp = raw_e * (1 + side * tv / 100)
+        elif tm == "pts":
+            tp = raw_e + side * tv
+        elif tm == "rr" and sl is not None:
+            tp = raw_e + side * tv * abs(raw_e - sl)
+        # ---- আংশিক প্রফিট বুকিং (T1/T2) — লট পূর্ণসংখ্যায়, অন্তত ১ লট রানারের জন্য থাকে ----
+        L = G["lots"]
+        tg = cs.get("tg", {})
+        books = []
+        if tg.get("on") and L >= 2:
+            unit = tg.get("unit", "pct")
+
+            def tpx(v):
+                if unit == "pct":
+                    return raw_e * (1 + side * v / 100)
+                if unit == "pts":
+                    return raw_e + side * v
+                if unit == "rr" and sl0 is not None:
+                    return raw_e + side * v * abs(raw_e - sl0)
+                return None
+            spec = [("T1", float(tg["t1"]["val"]), float(tg["t1"]["qty"]))]
+            if tg["t2"].get("on"):
+                spec.append(("T2", float(tg["t2"]["val"]), float(tg["t2"]["qty"])))
+            left = L - 1
+            for tag, v, q in spec:
+                if left <= 0:
+                    break
+                p = tpx(v)
+                if p is None or p <= 0:
+                    continue
+                if books and (p - books[-1][0]) * side <= 0:
+                    continue
+                if tp is not None and (p - tp) * side >= 0:
+                    continue
+                n = max(1, min(int(L * q / 100.0 + 0.4999), left))     # ৩ লটের ৫০% = ১ লট
+                books.append([p, n, tag])
+                left -= n
+        a1, a2 = tg.get("a1", {}), tg.get("a2", {})
+        tr = cs["trail"]
+        tmode = tr.get("mode", "none")
+        trail_v = float(tr.get("val", 15))
+        trail_act = float(tr.get("act", 0) or 0)
+        t_pts = tr.get("unit", "pct") == "pts"
+        t_trig = float(tr.get("trig", 10) or 0)
+        t_move = float(tr.get("move", 5) or 0)
+        trig_pts = t_trig if t_pts else raw_e * t_trig / 100.0
+        move_pts = t_move if t_pts else raw_e * t_move / 100.0
+        be_on = bool(cs["be"]["on"])
+        be_v = float(cs["be"]["val"])
+        tstop = int(float(cs.get("time_stop", 0) or 0))
+        peak = raw_e
+        mfe = mae = 0.0
+        nb = len(t)
+        jj = j
+        rem = L
+        bk = 0
+        legs = []
+        reason = px = None
+        exit_idx = None
+
+        def tighten(cur, new):
+            if cur is None:
+                return new
+            return max(cur, new) if side == 1 else min(cur, new)
+        while jj < nb and t[jj] < day_end:
+            s = int(t[jj])
+            oo, hh, ll = float(o[jj]), float(h[jj]), float(l[jj])
+            full = None
+            if jj > j:
+                if s % 1440 >= sq:
+                    full = ("Square-off", oo)
+                elif s in xs:
+                    full = ("Signal Exit", oo)
+                elif tstop and s - te >= tstop:
+                    full = ("Time Stop", oo)
+            hits = []
+            if full is None:
+                if side == 1:
+                    sl_hit = sl is not None and ll <= sl
+                    tp_hit = tp is not None and hh >= tp
+                    gap_sl = jj > j and sl is not None and oo <= sl
+                    gap_tp = jj > j and tp is not None and oo >= tp
+                else:
+                    sl_hit = sl is not None and hh >= sl
+                    tp_hit = tp is not None and ll <= tp
+                    gap_sl = jj > j and sl is not None and oo >= sl
+                    gap_tp = jj > j and tp is not None and oo <= tp
+                kk = bk
+                while kk < len(books):
+                    p = books[kk][0]
+                    g = jj > j and ((oo >= p) if side == 1 else (oo <= p))
+                    hit = (hh >= p) if side == 1 else (ll <= p)
+                    if hit or g:
+                        hits.append((kk, oo if g else p))
+                        kk += 1
+                    else:
+                        break
+                if gap_sl:
+                    full, hits = ("SL (gap)", oo), []
+                elif gap_tp:
+                    full, hits = ("Target (gap)", oo), []
+                elif sl_hit and tp_hit:
+                    full = ("SL", sl) if sl_first else ("Target", tp)
+                    if sl_first:
+                        hits = []
+                elif sl_hit:
+                    full = ("SL", sl)
+                    if sl_first:
+                        hits = []
+                elif tp_hit:
+                    full = ("Target", tp)
+            if full is None or full[0] in ("SL", "Target"):
+                if side == 1:
+                    mfe, mae = max(mfe, hh - raw_e), max(mae, raw_e - ll)
+                else:
+                    mfe, mae = max(mfe, raw_e - ll), max(mae, hh - raw_e)
+            for kk, fp in hits:
+                legs.append((books[kk][1], fp, s, books[kk][2]))
+                rem -= books[kk][1]
+                bk = kk + 1
+            if full is not None:
+                legs.append((rem, full[1], s, full[0]))
+                reason, px = full
+                exit_idx = jj
+                break
+            # টার্গেট লাগার পর SL সরানো (পরের বার থেকে কার্যকর)
+            for kk, _ in hits:
+                tag = books[kk][2]
+                if tag == "T1":
+                    m1 = a1.get("mode", "be")
+                    if m1 == "be":
+                        sl = tighten(sl, raw_e)
+                    elif m1 == "lock":
+                        sl = tighten(sl, raw_e * (1 + side * float(a1.get("val", 5) or 0) / 100.0))
+                elif tag == "T2":
+                    m2 = a2.get("mode", "t1")
+                    if m2 == "t1" and books:
+                        sl = tighten(sl, books[0][0])
+                    elif m2 == "be":
+                        sl = tighten(sl, raw_e)
+            # বারের শেষে ট্রেইলিং / ব্রেকইভেন আপডেট
+            peak = max(peak, hh) if side == 1 else min(peak, ll)
+            if be_on and (peak - raw_e) * side / raw_e * 100 >= be_v:
+                sl = tighten(sl, raw_e)
+            fav = (peak - raw_e) * side
+            lvl = None
+            if tmode == "pct" and fav / raw_e * 100 >= trail_act:
+                lvl = peak * (1 - side * trail_v / 100)
+            elif tmode == "step" and trig_pts > 0:
+                k = int(fav // trig_pts)
+                if k >= 1:
+                    lvl = (sl0 if sl0 is not None else raw_e) + side * k * move_pts
+            if lvl is not None:
+                sl = tighten(sl, lvl)
+            jj += 1
+        if exit_idx is None:
+            exit_idx = jj - 1
+            reason, px = "Day End", float(c[exit_idx])
+            legs.append((rem, px, int(t[exit_idx]), reason))
+        entry_eff = raw_e + side * slip
+        qty = L * lot
+        gross = 0.0
+        costs = G["brokerage"]
+        sell_turn = 0.0
+        wsum = 0.0
+        ltxt = []
+        for (q_l, p_l, t_l, why) in legs:
+            q_ = q_l * lot
+            ex_eff = p_l - side * slip
+            gross += (ex_eff - entry_eff) * side * q_
+            costs += G["brokerage"]
+            sell_turn += (ex_eff if side == 1 else entry_eff) * q_
+            wsum += ex_eff * q_
+            ltxt.append(dict(q=int(q_l), px=round(ex_eff, 2), t=hm_str(t_l), why=why))
+        costs += G["charges_pct"] / 100.0 * sell_turn
+        exit_eff = (legs[0][1] - side * slip) if len(legs) == 1 else (wsum / qty if qty else 0.0)
+        return dict(exit_t=int(t[exit_idx]), exit_px=float(px), entry_eff=entry_eff, exit_eff=exit_eff,
+                    reason=reason, qty=qty, gross=float(gross), costs=float(costs), net=float(gross - costs),
+                    bars=int(exit_idx - j + 1), mae=float(mae / raw_e * 100) if raw_e else 0.0,
+                    mfe=float(mfe / raw_e * 100) if raw_e else 0.0, legs=ltxt if len(ltxt) > 1 else None,
+                    risk=float(abs(raw_e - sl0) * qty) if sl0 is not None else None,
+                    ret=float((exit_eff - entry_eff) * side / entry_eff * 100) if entry_eff else 0.0)
+
+    total = max(len(eligible), 1)
+    for di, (d, ex) in enumerate(eligible):
+        if progress and di % 15 == 0:
+            progress(di / total)
+        i0 = int(np.searchsorted(B.day, d, "left"))
+        i1 = int(np.searchsorted(B.day, d, "right"))
+        if i1 <= i0 or not (cases or pcases):
+            continue
+        cand = [np.flatnonzero(sg[i0:i1]) + i0 for (_, _, sg, _) in cases]
+        evs = []
+        if PM:
+            dpi = int(np.searchsorted(D.du, d))
+            for ci, cs in pcases:
+                typ, sm = cs["opt"], cs["strike"]
+                stks = D.strikes.get((ex, typ))
+                lst = []
+                if stks is not None and len(stks):
+                    if sm["mode"] == "prem":
+                        X, bd = float(sm["prem"]), float(sm.get("band", 30)) / 100.0
+                        pool = [float(x) for x in stks]
+                    else:
+                        atm = int(np.argmin(np.abs(stks - D.dO[dpi])))
+                        kk = atm + (int(float(sm["off"])) if typ == "CE" else -int(float(sm["off"])))
+                        pool = [float(stks[kk])] if 0 <= kk < len(stks) else []
+                        X, bd = None, None
+                    for sk in pool:
+                        rr = PS.get((ex, typ, sk), {}).get(ci)
+                        if rr is None:
+                            continue
+                        a = np.flatnonzero((rr[0] >= d * 1440) & (rr[0] < (d + 1) * 1440))
+                        for q in a:
+                            pr = float(rr[1][q])
+                            if X is not None and (pr <= 0 or abs(pr - X) > X * bd):
+                                continue
+                            lst.append((int(rr[0][q]), abs(pr - X) if X is not None else 0.0, sk, ci, cs))
+                lst.sort(key=lambda e: (e[0], e[1]))
+                evs.append(lst)
+        cursor = -1
+        ntr = 0
+        dpnl = 0.0
+        day_end = (d + 1) * 1440
+        lot = D.exp_lot.get(ex, 1)
+        while ntr < G["max_trades"]:
+            if PM:
+                bestp = None
+                for lst in evs:
+                    for e in lst:
+                        if e[0] > cursor:
+                            if bestp is None or e[0] < bestp[0]:
+                                bestp = e
+                            break
+                if bestp is None:
+                    break
+                te, _, sk, ci, cs = bestp
+                r0 = locate(ex, cs["opt"], sk, te)
+                if r0 is None:
+                    skipped["ডেটা নেই (কন্ট্র্যাক্টে বার নেই)"] += 1
+                    cursor = te
+                    continue
+                ct, j = r0
+                if ct[1][j] <= 0:
+                    cursor = te
+                    continue
+                xs = set(PS[(ex, cs["opt"], sk)][ci][2].tolist())
+                sp_i = max(int(np.searchsorted(D.t, te)) - 1, 0)
+                spot_px = float(D.c[sp_i])
+                stk = sk
+            else:
+                best = None
+                for k in range(len(cases)):
+                    idxs = cand[k]
+                    if len(idxs) == 0:
+                        continue
+                    pos = int(np.searchsorted(B.e[idxs], cursor, side="right"))
+                    if pos < len(idxs):
+                        ii = int(idxs[pos])
+                        if best is None or B.e[ii] < B.e[best[0]]:
+                            best = (ii, k)
+                if best is None:
+                    break
+                ii, k = best
+                ci, cs, sg, xs = cases[k]
+                te = int(B.e[ii])
+                pk = pick(cs, ex, te, float(B.c[ii]))
+                if pk is None or pk == "nostrike":
+                    skipped["ডেটা নেই (কন্ট্র্যাক্টে বার নেই)" if pk is None else "স্ট্রাইক পাওয়া যায়নি"] += 1
+                    cursor = te
+                    continue
+                ct, j, stk = pk
+                if ct[1][j] <= 0:
+                    cursor = te
+                    continue
+                spot_px = float(B.c[ii])
+            r = run_trade(cs, xs, ct, j, te, day_end, lot)
+            trades.append({
+                "date": day_str(d), "case": cs["name"], "side": "%s %s %d" % (cs["action"], cs["opt"], stk),
+                "expiry": day_str(ex), "in": hm_str(te), "out": hm_str(r["exit_t"]),
+                "entry": round(r["entry_eff"], 2), "exit": round(r["exit_eff"], 2),
+                "reason": r["reason"], "lots": G["lots"], "qty": r["qty"],
+                "gross": round(r["gross"], 2), "costs": round(r["costs"], 2), "net": round(r["net"], 2),
+                "ret": round(r["ret"], 2), "spot": round(spot_px, 2), "bars": r["bars"],
+                "hold": r["bars"] * BASE_TF, "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
+                "r": round(r["net"] / r["risk"], 2) if r["risk"] else None,
+                "dte": int(ex - d), "dow": DOWN[(d + 3) % 7], "legs": r["legs"]})
+            ntr += 1
+            dpnl += r["net"]
+            cursor = r["exit_t"]
+            if (G["day_loss"] > 0 and dpnl <= -G["day_loss"]) or (G["day_profit"] > 0 and dpnl >= G["day_profit"]):
+                break
+
+    days_list = [day_str(d) for d, _ in eligible]
+    cut = int(len(days_list) * G["split"] / 100.0)
+    split_date = days_list[cut] if 0 < cut < len(days_list) else None
+    tr_tr = [t for t in trades if split_date and t["date"] < split_date] if split_date else trades
+    tr_te = [t for t in trades if split_date and t["date"] >= split_date] if split_date else []
+    cap = G["capital"]
+    out = {"stats": {"all": calc_stats(trades, cap), "train": calc_stats(tr_tr, cap), "test": calc_stats(tr_te, cap)},
+           "meta": {"days": len(days_list), "from": days_list[0] if days_list else None,
+                    "to": days_list[-1] if days_list else None, "split_date": split_date,
+                    "skipped": skipped, "cases_active": len(cases),
+                    "warn": (["আংশিক প্রফিট বুকিং চালু, কিন্তু লট ১ — ভাগ করা যায় না। লট কমপক্ষে ২ দিন।"]
+                             if G["lots"] < 2 and any(c["on"] and c["tg"]["on"] for c in st["cases"]) else [])}}
+    if light:
+        return out
+    out["trades"] = trades
+    out["an"] = analyze(trades, cap, BASE_TF)
+    eq, cum = [], 0.0
+    for t in trades:
+        cum += t["net"]
+        eq.append(round(cum, 2))
+    out["equity"] = eq
+    yr, mo = {}, {}
+    for t in trades:
+        yr.setdefault(t["date"][:4], []).append(t)
+        mo.setdefault(t["date"][:7], []).append(t)
+    out["yearly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(yr.items())]
+    out["monthly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(mo.items())]
+    return out
+
+
+# =====================================================================
+#  টিউনিং (প্যারামিটার সুইপ)
+# =====================================================================
+
+def set_path(obj, path, val):
+    ks = path.split(".")
+    o = obj
+    for k in ks[:-1]:
+        o = o[int(k)] if isinstance(o, list) else o[k]
+    last = ks[-1]
+    if isinstance(o, list):
+        o[int(last)] = val
+    else:
+        o[last] = val
+
+
+def run_sweep(D, base, params, progress=None):
+    base = norm_settings(base)
+    combos = list(itertools.product(*[p["values"] for p in params]))
+    if len(combos) > 150:
+        raise ValueError("সর্বোচ্চ ১৫০টি কম্বিনেশন চলে (এখন %d)। মান কমান।" % len(combos))
+    rows = []
+    for i, cmb in enumerate(combos):
+        s = copy.deepcopy(base)
+        for p, v in zip(params, cmb):
+            set_path(s, p["path"], v)
+        r = backtest(D, s, light=True)
+        rows.append({"vals": list(cmb), "all": r["stats"]["all"], "train": r["stats"]["train"], "test": r["stats"]["test"]})
+        if progress:
+            progress((i + 1) / len(combos))
+    return {"rows": rows, "labels": [p.get("label", p["path"]) for p in params], "paths": [p["path"] for p in params]}
+
+
+
+# =====================================================================
+#  একটি ট্রেডের চার্ট ডেটা (স্পট + প্রিমিয়াম)
+# =====================================================================
+
+PRICE_OVERLAY = {"ma1", "ma2", "ma3", "st1", "st2", "vwap", "bbup", "bbmid", "bblow", "donhi", "donlo", "orbh", "orbl",
+                 "orbm", "dayo", "dayh", "dayl", "pdh", "pdl", "pdc", "pivp", "r1", "r2", "r3", "s1", "s2", "s3",
+                 "cprt", "cprb"}
+PLAIN_PRICE = {"close", "open", "high", "low", "hl2", "hlc3", "ohlc4"}
+
+
+def chart_data(D, raw, body):
+    st = norm_settings(raw)
+    G = st["general"]
+    S, B = compute_sources(D, G["tf"], st["ind"])
+    d = day_int(body["date"])
+    i0 = int(np.searchsorted(B.day, d, "left"))
+    i1 = int(np.searchsorted(B.day, d, "right"))
+    if i1 <= i0:
+        raise ValueError("এই দিনের স্পট ডেটা নেই")
+    labels = {x[0]: x[1] for x in SOURCES}
+    cs = None
+    for c in st["cases"]:
+        if c["name"] == body.get("case"):
+            cs = c
+    cases = [cs] if cs else [c for c in st["cases"] if c["on"]]
+    ids, hl = [], {}
+    for c in cases:
+        for part in ("entry", "exit"):
+            for sl_ in c[part]:
+                if not sl_["on"]:
+                    continue
+                for k in ("l", "r"):
+                    v = sl_[k]
+                    if v != "number" and v in S and v not in PLAIN_PRICE and v not in ids:
+                        ids.append(v)
+                if sl_["r"] == "number" and sl_["l"] not in PRICE_OVERLAY and sl_["l"] not in PLAIN_PRICE:
+                    hl.setdefault(sl_["l"], [])
+                    if float(sl_["num"]) not in hl[sl_["l"]]:
+                        hl[sl_["l"]].append(float(sl_["num"]))
+    PMC = G.get("chart") == "prem"
+    pov, ppan = [], []
+    if PMC:
+        sd_ = body["side"].split()
+        ct_ = D.opt.get((day_int(body["expiry"]), sd_[1], float(sd_[2])))
+        if ct_ is not None:
+            V = contract_view(D, ct_)
+            S2, B2 = compute_sources(V, G["tf"], st["ind"])
+            j0 = int(np.searchsorted(B2.day, d, "left"))
+            j1 = int(np.searchsorted(B2.day, d, "right"))
+            T2 = B2.t[j0:j1] * 60
+
+            def series2(arr):
+                a = arr[j0:j1]
+                return [dict(t=int(T2[k]), v=float(a[k])) for k in range(len(a)) if np.isfinite(a[k])]
+            pov = [dict(id=v, name=labels.get(v, v), data=series2(S2[v])) for v in ids if v in PRICE_OVERLAY]
+            ppan = [dict(id=v, name=labels.get(v, v), data=series2(S2[v]), hl=hl.get(v, []))
+                    for v in ids if v not in PRICE_OVERLAY][:4]
+            V._cache.clear()
+    T = B.t[i0:i1] * 60
+    spot = [dict(t=int(T[k]), o=float(B.o[i0 + k]), h=float(B.h[i0 + k]), l=float(B.l[i0 + k]), c=float(B.c[i0 + k]))
+            for k in range(i1 - i0)]
+
+    def series(arr):
+        a = arr[i0:i1]
+        return [dict(t=int(T[k]), v=float(a[k])) for k in range(len(a)) if np.isfinite(a[k])]
+    overlays = [dict(id=v, name=labels.get(v, v), data=series(S[v])) for v in ids if v in PRICE_OVERLAY]
+    panes = [dict(id=v, name=labels.get(v, v), data=series(S[v]), hl=hl.get(v, []))
+             for v in ids if v not in PRICE_OVERLAY][:4]
+    if PMC:
+        overlays, panes = [], []
+    # প্রিমিয়াম
+    side = body["side"].split()
+    typ, stk = side[1], float(side[2])
+    ex = day_int(body["expiry"])
+    ct = D.opt.get((ex, typ, stk))
+    prem, lines = [], []
+    te = d * 1440 + hm(body["in"])
+    tx = d * 1440 + hm(body["out"])
+    if ct is not None:
+        m = (ct[0] >= d * 1440) & (ct[0] < (d + 1) * 1440)
+        idx = np.flatnonzero(m)
+        prem = [dict(t=int(ct[0][k]) * 60, o=float(ct[1][k]), h=float(ct[2][k]), l=float(ct[3][k]), c=float(ct[4][k])) for k in idx]
+        j = np.flatnonzero(ct[0] == te)
+        if len(j) and cs:
+            raw_e = float(ct[1][j[0]])
+            sd = 1 if cs["action"] == "BUY" else -1
+            sm, sv = cs["sl"]["mode"], float(cs["sl"]["val"])
+            tm, tv = cs["tp"]["mode"], float(cs["tp"]["val"])
+            slv = tpv = None
+            if sm == "pct":
+                slv = raw_e * (1 - sd * sv / 100)
+            elif sm == "pts":
+                slv = raw_e - sd * sv
+            if tm == "pct":
+                tpv = raw_e * (1 + sd * tv / 100)
+            elif tm == "pts":
+                tpv = raw_e + sd * tv
+            elif tm == "rr" and slv is not None:
+                tpv = raw_e + sd * tv * abs(raw_e - slv)
+            lines.append(dict(v=raw_e, name="এন্ট্রি", color="#4f9cff"))
+            if slv is not None:
+                lines.append(dict(v=slv, name="SL", color="#ff6161"))
+            tgc = cs.get("tg", {})
+            if tgc.get("on") and G["lots"] >= 2:
+                u_ = tgc.get("unit", "pct")
+
+                def tgp(v_):
+                    if u_ == "pct":
+                        return raw_e * (1 + sd * v_ / 100)
+                    if u_ == "pts":
+                        return raw_e + sd * v_
+                    return raw_e + sd * v_ * abs(raw_e - slv) if slv is not None else None
+                p1 = tgp(float(tgc["t1"]["val"]))
+                if p1 is not None:
+                    lines.append(dict(v=p1, name="T1", color="#f5c542"))
+                if tgc["t2"].get("on"):
+                    p2 = tgp(float(tgc["t2"]["val"]))
+                    if p2 is not None:
+                        lines.append(dict(v=p2, name="T2", color="#f59e42"))
+            if tpv is not None:
+                lines.append(dict(v=tpv, name="টার্গেট", color="#2ecc71"))
+    # স্পটে মার্কার: যে বারে সিগন্যাল শেষ / যে বারে এক্সিট
+    def spot_idx(tm_):
+        k = int(np.searchsorted(B.e[i0:i1], tm_, side="left"))
+        return min(k, len(spot) - 1)
+    ke = spot_idx(te)
+    kx = min(int(np.searchsorted(B.t[i0:i1], tx, side="right")) - 1, len(spot) - 1)
+    kx = max(kx, 0)
+    marks = {"spot": [dict(t=spot[ke]["t"], p=spot[ke]["c"], k="in"), dict(t=spot[kx]["t"], p=spot[kx]["c"], k="out")],
+             "prem": [dict(t=te * 60, p=float(body.get("entry", 0)), k="in"), dict(t=tx * 60, p=float(body.get("exit", 0)), k="out")]}
+    for lg in (body.get("legs") or [])[:-1]:       # শেষ লেগ = মূল এক্সিট; বাকিগুলো আংশিক বুকিং
+        try:
+            marks["prem"].append(dict(t=(d * 1440 + hm(lg["t"])) * 60, p=float(lg["px"]), k="part", q=int(lg["q"]), why=lg["why"]))
+        except (KeyError, ValueError, TypeError):
+            pass
+    return {"spot": spot, "overlays": overlays, "panes": panes, "prem": prem, "lines": lines, "marks": marks,
+            "pov": pov, "ppan": ppan, "pmode": PMC,
+            "tf": int(G["tf"]), "base": BASE_TF, "open": OPEN_MIN * 60 + d * 86400}
+
+# =====================================================================
+#  প্রিসেট
+# =====================================================================
+
+def builtin_presets():
+    P = {}
+    c = default_case(1)
+    c["name"] = "ORB Breakout (Buy CE)"
+    P["ORB Breakout → Buy CE"] = {"cases": [c]}
+    c = default_case(1)
+    c["name"] = "ORB Breakdown (Buy PE)"
+    c["opt"] = "PE"
+    c["entry"] = [slot("close", "cross_below", "orbl"), slot("rsi", "below", "number", 45), slot("close", "below", "vwap")]
+    c["exit"] = [slot("close", "cross_above", "orbm", join="OR")]
+    P["ORB Breakdown → Buy PE"] = {"cases": [c]}
+    c = default_case(1)
+    c["name"] = "Prev Day High Break (Buy CE)"
+    c["entry"] = [slot("close", "cross_above", "pdh"), slot("adx", "above", "number", 20), slot("close", "above", "ma3")]
+    c["exit"] = [slot("close", "cross_below", "st1", join="OR")]
+    P["Prev Day High Break → Buy CE"] = {"cases": [c]}
+    c = default_case(1)
+    c["name"] = "5 EMA Alert Candle (Buy PE)"
+    c["opt"] = "PE"
+    c["entry"] = [slot("low", "above", "ma1", ls=1, rs=1), slot("close", "below", "low", rs=1)]
+    c["exit"] = [slot("close", "cross_above", "ma1", join="OR")]
+    c["tp"] = {"mode": "rr", "val": 2}
+    P["5 EMA Alert Candle → Buy PE"] = {"cases": [c]}
+    c = default_case(1)
+    c["name"] = "BB Breakout + RSI + ADX (Buy CE)"
+    c["entry"] = [slot("close", "cross_above", "bbup"), slot("rsi", "above", "number", 65),
+                  slot("volume", "above", "number", 10000, on=False), slot("adx", "rising", "number", 20)]
+    c["exit"] = [slot("close", "cross_below", "st1", join="OR"), slot("close", "cross_below", "bbmid", join="OR")]
+    c["sl"] = {"mode": "pct", "val": 20}
+    c["tp"] = {"mode": "none", "val": 40}
+    P["BB Breakout + RSI + ADX → Buy CE"] = {"cases": [c]}
+    return P
+
+
+PRESET_FILE = "presets.json"
+
+
+def load_user_presets():
+    try:
+        with open(PRESET_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_user_presets(p):
+    with open(PRESET_FILE, "w", encoding="utf-8") as f:
+        json.dump(p, f, ensure_ascii=False, indent=1)
+
+
+# =====================================================================
+#  সার্ভার
+# =====================================================================
+
+RUN_LOCK = threading.Lock()
+JOBS = {}
+JOB_N = [0]
+DATA = {"D": None, "src": None}
+
+
+def clean(o):
+    if isinstance(o, dict):
+        return {str(k): clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [clean(v) for v in o]
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (float, np.floating)):
+        f = float(o)
+        return None if (math.isnan(f) or math.isinf(f)) else f
+    if isinstance(o, np.bool_):
+        return bool(o)
+    return o
+
+
+def start_job(kind, payload):
+    JOB_N[0] += 1
+    jid = str(JOB_N[0])
+    JOBS[jid] = {"status": "queued", "progress": 0.0}
+    for old in list(JOBS.keys())[:-20]:
+        JOBS.pop(old, None)
+
+    def work():
+        with RUN_LOCK:
+            JOBS[jid]["status"] = "running"
+            t0 = dt.datetime.now()
+            try:
+                prog = lambda p: JOBS[jid].__setitem__("progress", float(p))
+                D = DATA["D"]
+                if kind == "run":
+                    res = backtest(D, payload["settings"], progress=prog)
+                else:
+                    res = run_sweep(D, payload["settings"], payload["params"], progress=prog)
+                JOBS[jid].update(status="done", progress=1.0, result=clean(res),
+                                 secs=(dt.datetime.now() - t0).total_seconds())
+            except Exception as e:
+                traceback.print_exc()
+                JOBS[jid].update(status="error", error="%s: %s" % (type(e).__name__, e))
+    threading.Thread(target=work, daemon=True).start()
+    return jid
+
+
+def data_info():
+    D = DATA["D"]
+    ex = []
+    for e in D.expiries:
+        lo, hi = D.exp_range[e]
+        ex.append({"expiry": day_str(e), "lot": D.exp_lot.get(e), "from": day_str(lo // 1440), "to": day_str(hi // 1440),
+                   "ce": int(len(D.strikes.get((e, "CE"), []))), "pe": int(len(D.strikes.get((e, "PE"), [])))})
+    src = DATA.get("src") or {}
+    return {"spot_from": day_str(D.du[0]), "spot_to": day_str(D.du[-1]), "spot_days": int(len(D.du)),
+            "expiries": ex, "contracts": len(D.opt), "base": BASE_TF,
+            "name": src.get("name", "BankNifty"), "inst": src.get("inst", ""), "mode": src.get("mode", "csv"),
+            "from": src.get("from", ""), "to": src.get("to", "")}
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, body, ctype="application/json"):
+        b = body if isinstance(body, (bytes, bytearray)) else body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype + "; charset=utf-8")
+        self.send_header("Content-Length", str(len(b)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(b)
+
+    def _json(self, obj, code=200):
+        self._send(code, json.dumps(clean(obj), ensure_ascii=False))
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        try:
+            if u.path in ("/", "/index.html"):
+                return self._send(200, HTML, "text/html")
+            if u.path == "/api/meta":
+                return self._json({"sources": SOURCES, "ops": OPS, "defaults": default_settings(),
+                                   "case": default_case(1), "slot": slot(), "info": data_info(),
+                                   "datasets": (datasets_info(DATA["src"]["db_dir"]) if (DATA.get("src") or {}).get("mode") == "db" else None),
+                                   "presets": {"builtin": builtin_presets(), "user": load_user_presets()}})
+            if u.path == "/api/job":
+                jid = parse_qs(u.query).get("id", [""])[0]
+                j = JOBS.get(jid)
+                return self._json(j if j else {"status": "error", "error": "job নেই"})
+            return self._send(404, "not found", "text/plain")
+        except Exception as e:
+            traceback.print_exc()
+            return self._json({"error": str(e)}, 500)
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            if u.path == "/api/start":
+                return self._json({"id": start_job(body["kind"], body)})
+            if u.path == "/api/load":
+                src = DATA.get("src")
+                if not src or src.get("mode") != "db":
+                    return self._json({"error": "এই মোড CSV-র। SQLite ডেটার জন্য --db দিয়ে চালান"}, 400)
+                inst = str(body.get("inst", "")).upper()
+                with RUN_LOCK:
+                    DATA["D"] = load_db(src["db_dir"], inst, body.get("from") or None, body.get("to") or None)
+                    d = DATA["D"]
+                    src.update(inst=inst, name=INSTR_NAMES.get(inst, inst), **{"from": day_str(d.du[0]), "to": day_str(d.du[-1])})
+                info = data_info()
+                if not info["expiries"]:
+                    info["warn"] = "এই ইনডেক্সে অপশন ডেটা এখনো নেই (ডাউনলোড বাকি)। ব্যাকটেস্ট চলবে না।"
+                return self._json({"info": info})
+            if u.path == "/api/chart":
+                return self._json(chart_data(DATA["D"], body["settings"], body))
+            if u.path == "/api/preset/save":
+                p = load_user_presets()
+                p[body["name"]] = body["settings"]
+                save_user_presets(p)
+                return self._json({"ok": True, "user": p})
+            if u.path == "/api/preset/delete":
+                p = load_user_presets()
+                p.pop(body["name"], None)
+                save_user_presets(p)
+                return self._json({"ok": True, "user": p})
+            return self._send(404, "not found", "text/plain")
+        except Exception as e:
+            traceback.print_exc()
+            return self._json({"error": str(e)}, 500)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spot", default="banknifty_5min.csv")
+    ap.add_argument("--opt", default="data_opt")
+    ap.add_argument("--db", default="", help="gb.db ও gb_opt.db যে ফোল্ডারে আছে (SQLite মোড)")
+    ap.add_argument("--inst", default="N50", help="SQLite মোডে: BN, N50, FIN, SEN")
+    ap.add_argument("--from", dest="d_from", default="", help="শুরুর তারিখ YYYY-MM-DD (ফাঁকা = শেষ ~৬ মাস)")
+    ap.add_argument("--to", dest="d_to", default="", help="শেষ তারিখ YYYY-MM-DD")
+    ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--host", default="127.0.0.1")
+    a = ap.parse_args()
+    print("ডেটা লোড হচ্ছে...")
+    if a.db:
+        db_dir = os.path.abspath(os.path.expanduser(a.db))
+        inst = a.inst.upper()
+        DATA["D"] = load_db(db_dir, inst, a.d_from or None, a.d_to or None)
+        D = DATA["D"]
+        DATA["src"] = {"mode": "db", "db_dir": db_dir, "inst": inst, "name": INSTR_NAMES.get(inst, inst),
+                       "from": day_str(D.du[0]), "to": day_str(D.du[-1])}
+        if not D.expiries:
+            print("সতর্কতা: %s-এর অপশন ডেটা এখনো নেই। অন্য ইনডেক্স বা সময় বেছে নিন (Data ট্যাব)।" % inst)
+    else:
+        if not os.path.exists(a.spot):
+            raise SystemExit("স্পট ফাইল নেই: %s (ফোল্ডারটা ঠিক আছে তো?)" % a.spot)
+        DATA["D"] = load_data(a.spot, a.opt)
+        if not DATA["D"].expiries:
+            raise SystemExit("অপশন ডেটা পাওয়া যায়নি: %s ফোল্ডারে opt_*.csv.gz নেই" % a.opt)
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    print("\nতৈরি! ব্রাউজারে খুলুন:  http://127.0.0.1:%d\n(বন্ধ করতে Ctrl+C)" % a.port)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nবন্ধ।")
+
+
+HTML = r'''<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a1710">
+<title>Green Bull Algo Builder</title>
+<style>
+:root{--bg:#050908;--card:#0c1511;--card2:#111d17;--line:#1b2c23;--line2:#27412f;--tx:#eaf3ee;--mut:#7f948a;--ac:#22d36b;--ac2:#13a352;--g:#2ee27d;--r:#ff5a67;--y:#f5c542;--b:#4f9cff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;color:var(--tx);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Bengali",sans-serif;font-variant-numeric:tabular-nums}
+body{background:radial-gradient(900px 420px at 50% -140px,#12351f 0%,transparent 62%),radial-gradient(600px 300px at 100% 40%,#0c2a1a55 0%,transparent 70%),var(--bg);background-attachment:fixed;min-height:100vh}
+header.top{position:sticky;top:0;z-index:5;padding:11px 14px 10px;background:linear-gradient(180deg,#0b1a12f2,#08120dd9);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid #1d4430;display:flex;flex-direction:column;gap:7px}
+header.top:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,#22d36b99,transparent)}
+.brand{display:flex;align-items:center;gap:11px}
+.logo{width:42px;height:42px;border-radius:13px;background:conic-gradient(from 210deg,#22d36b,#0f7a3a,#22d36b);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px #5df5a255,0 6px 22px #22d36b44}
+.logo svg{filter:drop-shadow(0 1px 2px #0006)}
+h1{margin:0;font-size:18px;letter-spacing:.3px;font-weight:800;line-height:1.15}
+h1 span{background:linear-gradient(90deg,#4ef08d,#22d36b);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
+.tag{font-size:10px;color:#6fae8e;letter-spacing:1.4px;text-transform:uppercase;margin-top:2px}
+#dinfo{display:flex;flex-wrap:wrap;gap:5px;font-size:11px;color:var(--mut)}
+#dinfo .pl{background:#0b1a12;border:1px solid #1d3a2a;border-radius:20px;padding:2px 10px;color:#a9d3bd}
+#dinfo .pl:first-child:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ac);margin-right:6px;box-shadow:0 0 8px var(--ac);vertical-align:1px}
+nav{display:flex;position:fixed;left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom));height:58px;background:#09130ff0;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid #1f4030;border-radius:20px;z-index:8;padding:5px;box-shadow:0 12px 34px -8px #000c,0 0 0 1px #ffffff06 inset}
+nav button{flex:1;padding:4px 2px;border:0;background:transparent;color:#6f857b;font-size:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:14px;letter-spacing:.5px;font-weight:600;transition:all .18s}
+nav button svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+nav button.on{color:#06210f;background:linear-gradient(180deg,#34e57c,#1fbf5e);box-shadow:0 4px 14px #22d36b55}
+main{padding:12px 11px 200px;max-width:760px;margin:0 auto}
+.h2{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:#6fae8e;margin:16px 2px 8px}
+.h2:after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent)}
+.pill{display:inline-block;font-size:10px;border:1px solid #2a5a40;color:#7fe0a8;border-radius:20px;padding:1px 8px;margin-left:6px}
+.pill.soon{border-color:#5a4a1a;color:#f5c542}
+.tilegrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+section[hidden]{display:none}
+.card{background:linear-gradient(180deg,#0e1914,#0b130f);border:1px solid var(--line);border-radius:16px;margin:0 0 11px;padding:0;box-shadow:0 1px 0 #ffffff08 inset,0 14px 28px -18px #000}
+.card>summary{padding:13px 14px;font-weight:700;cursor:pointer;list-style:none;letter-spacing:.2px}
+.card>summary::-webkit-details-marker{display:none}
+.card>summary:after{content:"";float:right;width:8px;height:8px;margin-top:6px;border-right:2px solid var(--mut);border-bottom:2px solid var(--mut);transform:rotate(45deg);transition:transform .2s}
+.card[open]>summary:after{transform:rotate(-135deg);margin-top:9px}
+.card[open]>summary{border-bottom:1px solid var(--line)}
+.body{padding:12px 14px 14px;display:flex;flex-wrap:wrap;gap:10px}
+.f{display:flex;flex-direction:column;gap:3px;min-width:92px;flex:1 1 92px}
+.f>span{font-size:11px;color:var(--mut);letter-spacing:.2px}
+.f.chk{flex-direction:row;align-items:center;gap:8px;flex:1 1 100%}
+select,input[type=text],input[type=number],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
+select:focus,input:focus,textarea:focus{outline:0;border-color:var(--ac);box-shadow:0 0 0 3px #22d36b22}
+input[type=checkbox]{width:19px;height:19px;accent-color:var(--ac)}
+.ind{width:100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
+.ind>b{flex:1 1 100%;font-size:13px}
+.case{border-color:#1f5a3f;border-left:3px solid var(--ac)}
+.case>summary{color:#8df0b3}
+.sub{flex:1 1 100%;font-size:12px;color:var(--mut);margin:8px 0 0;padding-top:10px;border-top:1px dashed var(--line);display:flex;justify-content:space-between;align-items:center}
+.cond{flex:1 1 100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:9px;display:flex;flex-direction:column;gap:7px}
+.r1{display:flex;gap:6px;align-items:flex-end}
+.r1>select,.r1>.mini{flex:1 1 0;min-width:0}
+.r1 .mini{min-width:60px}
+.r1 input[type=checkbox]{flex:0 0 22px;margin:0 2px 9px 2px}
+.r1 .btn{flex:0 0 auto;margin-bottom:1px}
+.cond.off{opacity:.45}
+select.jn{flex:0 0 70px!important}
+.btn{background:#101d16;color:var(--tx);border:1px solid var(--line2);border-radius:11px;padding:9px 13px;font-size:13px;font-weight:600;transition:transform .08s,filter .15s}
+.btn:active{transform:scale(.97)}
+.btn.p{background:linear-gradient(180deg,#34e57c,#1aa855);border-color:#4cf08e;color:#04180b;font-weight:800;box-shadow:0 6px 18px -4px #22d36b88}
+.btn.g{background:#1f6f43;border-color:#2a8a57;color:#fff}
+.btn.d{color:var(--r);border-color:#4a2228}
+.btn.s{padding:5px 10px;font-size:12px}
+.bar{position:fixed;left:10px;right:10px;bottom:calc(74px + env(safe-area-inset-bottom));background:#09130ff2;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid #1f4030;border-radius:16px;padding:8px 10px;display:flex;gap:10px;align-items:center;z-index:6;box-shadow:0 10px 30px -10px #000c}
+.bar .btn.p{flex:0 0 auto;padding:11px 22px;font-size:14px;letter-spacing:.4px}
+#status{flex:1;font-size:12px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#prog{height:3px;background:linear-gradient(90deg,#22d36b,#9bf5c0);box-shadow:0 0 10px #22d36b;width:0;position:fixed;bottom:calc(74px + env(safe-area-inset-bottom));left:10px;z-index:7;transition:width .3s;border-radius:3px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:7px 6px;text-align:right;border-bottom:1px solid #15241c;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:#6fae8e;font-weight:600;font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;position:sticky;top:0;background:#0b130f;z-index:1}
+tr:nth-child(even) td{background:#0a110e}
+tr[data-i]:hover td,tr[data-i]:active td{background:#122419}
+.pos{color:var(--g)}.neg{color:var(--r)}
+.scroll{overflow:auto;max-height:420px;border:1px solid var(--line);border-radius:12px;background:#0a110e}
+.kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:12px}
+.kpi{position:relative;overflow:hidden;background:linear-gradient(160deg,#0f1b15,#0a110e);border:1px solid var(--line);border-radius:14px;padding:11px 12px 11px 15px}
+.kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#2a4a39}
+.kpi.good:before{background:linear-gradient(180deg,#34e57c,#13a352)}.kpi.bad:before{background:linear-gradient(180deg,#ff7a85,#d63a49)}
+.kpi small{color:var(--mut);display:block;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase}
+.kpi b{font-size:19px;font-weight:800;letter-spacing:.2px}
+.kpi.hero{grid-column:1/-1;padding:16px 16px 14px 18px;border-radius:18px}
+.kpi.hero b{font-size:34px;line-height:1.15;display:block;margin:3px 0 6px}
+.kpi.hero.up{background:radial-gradient(500px 160px at 0% 0%,#14402a 0%,transparent 70%),linear-gradient(160deg,#0d2418,#08130d);border-color:#1f6f43}
+.kpi.hero.up:before{background:linear-gradient(180deg,#5df5a2,#13a352);width:4px}
+.kpi.hero.dn{background:radial-gradient(500px 160px at 0% 0%,#4a1a20 0%,transparent 70%),linear-gradient(160deg,#241012,#130a0b);border-color:#6b2a31}
+.kpi.hero.dn:before{background:linear-gradient(180deg,#ff7a85,#d63a49);width:4px}
+.hsub{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mut)}
+.hsub i{font-style:normal;color:var(--tx);font-weight:700}
+canvas{width:100%;height:200px;background:linear-gradient(180deg,#0c1511,#09100c);border:1px solid var(--line);border-radius:14px;display:block}
+.note{color:var(--mut);font-size:12px;margin:7px 2px}
+.warn{background:linear-gradient(180deg,#3a2c12,#2c210d);border:1px solid #6b4a14;color:#ffd58a;border-radius:12px;padding:9px 12px;font-size:12px;margin:0 0 11px}
+.ok{background:#12301f;border:1px solid #1f6f43;color:#9be7bb}
+h3{margin:18px 2px 7px;font-size:14px;font-weight:700;letter-spacing:.2px}
+.chip{display:inline-block;background:#101d16;border:1px solid var(--line);border-radius:99px;padding:2px 10px;font-size:11px;color:var(--mut);margin:2px 3px 0 0}
+.tgbox{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:10px;background:linear-gradient(160deg,#10200f,#0b150e);border:1px solid #2c5a22;border-radius:14px;padding:11px}
+.tgbox>.tgh{flex:1 1 100%;font-weight:700;color:#d6f5a3;display:flex;align-items:center;gap:7px}
+.lotplan{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}
+.lp{display:inline-flex;align-items:center;gap:5px;border-radius:9px;padding:3px 9px;font-weight:700;font-size:12px;border:1px solid}
+.lp.t1{background:#2a2410;border-color:#6b5a14;color:#f5c542}.lp.t2{background:#2a1c10;border-color:#6b4214;color:#f59e42}.lp.rn{background:#10281a;border-color:#1f6f43;color:#5df5a2}
+</style>
+</head>
+<body>
+<header class="top"><div class="brand"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l5-6 4 3 7-9"/><path d="M15 5h5v5"/></svg></div><div><h1>Green Bull <span>Algo Builder</span></h1><div class="tag">Quant Strategy Lab · Backtest · Optimize</div></div></div><div id="dinfo"><span class="pl">লোড হচ্ছে…</span></div></header>
+<nav>
+  <button data-tab="build" class="on"><svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>Strategy</button>
+  <button data-tab="res"><svg viewBox="0 0 24 24"><path d="M5 20V11M11 20V4M17 20v-6M3 20h18"/></svg>Results</button>
+  <button data-tab="tune"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>Optimize</button>
+  <button data-tab="pre"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg>Library</button>
+  <button data-tab="data"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Data</button>
+</nav>
+<main>
+  <section id="t-build"></section>
+  <section id="t-res" hidden><div class="note">এখনও কোনো রান হয়নি। নিচে ▶ Run চাপুন।</div></section>
+  <section id="t-tune" hidden></section>
+  <section id="t-pre" hidden></section>
+  <section id="t-data" hidden></section>
+</main>
+<div class="bar"><button class="btn p" id="run">▶ Run</button><div id="status">প্রস্তুত</div></div>
+<div id="prog"></div>
+
+<script>
+"use strict";
+let META = null, S = null, SW = [], LAST = null, TUNE = {a: {i: 0, from: 5, to: 30, step: 5}, b: {i: -1, from: 0, to: 0, step: 1}, min: 20, sort: 'net'};
+const $ = (s, r) => (r || document).querySelector(s);
+const MATYPES = [['ema','EMA'],['sma','SMA'],['wma','WMA'],['rma','RMA'],['hma','HMA']];
+let TFS = [[0,'চার্ট TF'],[5,'5m'],[10,'10m'],[15,'15m'],[30,'30m'],[60,'60m']];
+let CTFS = TFS.slice(1);
+function setBase(b) { const L = [1,3,5,6,9,10,12,15,18,21,30,45,60].filter(x => x % b === 0 && x >= b); TFS = [[0,'চার্ট TF']].concat(L.map(x => [x, x + 'm'])); CTFS = TFS.slice(1); }
+const PSRC = [['close','Close'],['open','Open'],['high','High'],['low','Low'],['hl2','HL2'],['hlc3','HLC3'],['ohlc4','OHLC4']];
+const OFFS = [[-3,'ITM 3'],[-2,'ITM 2'],[-1,'ITM 1'],[0,'ATM'],[1,'OTM 1'],[2,'OTM 2'],[3,'OTM 3'],[4,'OTM 4']];
+
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'value') e.value = v;
+    else if (k === 'checked') e.checked = !!v;
+    else if (k === 'on') for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
+    else if (k === 'html') e.innerHTML = v;
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat(9)) { if (kid == null || kid === false) continue; e.append(kid.nodeType ? kid : document.createTextNode(String(kid))); }
+  return e;
+}
+function getp(p) { return p.split('.').reduce((o, k) => o[k], S); }
+function setp(p, v) { const ks = p.split('.'); let o = S; for (let i = 0; i < ks.length - 1; i++) o = o[ks[i]]; o[ks[ks.length - 1]] = v; persist(); }
+function persist() { try { localStorage.setItem('ab_S2', JSON.stringify(S)); } catch (e) {} }
+function merge(def, inc) {
+  if (inc == null) return JSON.parse(JSON.stringify(def));
+  if (Array.isArray(def) || typeof def !== 'object') return inc;
+  const out = JSON.parse(JSON.stringify(def));
+  for (const k of Object.keys(inc)) out[k] = (k in def && def[k] && typeof def[k] === 'object' && !Array.isArray(def[k])) ? merge(def[k], inc[k]) : inc[k];
+  return out;
+}
+function fixSettings(inp) {
+  const d = META.defaults, s = {general: merge(d.general, (inp || {}).general), ind: merge(d.ind, (inp || {}).ind), cases: []};
+  for (const c of ((inp || {}).cases || d.cases)) {
+    const m = merge(META.case, Object.assign({}, c, {entry: undefined, exit: undefined}));
+    m.entry = (c.entry || META.case.entry).map(x => merge(META.slot, x));
+    m.exit = (c.exit || META.case.exit).map(x => merge(META.slot, x));
+    s.cases.push(m);
+  }
+  return s;
+}
+
+/* ---------- ফিল্ড বিল্ডার ---------- */
+function selCtl(path, opts, cb, numeric) {
+  const s = h('select');
+  for (const [v, t] of opts) s.append(h('option', {value: v}, t));
+  s.value = String(getp(path));
+  s.addEventListener('change', () => { setp(path, numeric ? parseFloat(s.value) : s.value); cb && cb(); });
+  return s;
+}
+function numCtl(path, label, step, noreg) {
+  const i = h('input', {type: 'number', step: step || 'any', inputmode: 'decimal', value: getp(path)});
+  i.addEventListener('change', () => { const x = parseFloat(i.value); setp(path, isNaN(x) ? 0 : x); });
+  if (!noreg) SW.push({path, label});
+  return i;
+}
+function txtCtl(path, ph) {
+  const i = h('input', {type: 'text', value: getp(path), placeholder: ph || ''});
+  i.addEventListener('change', () => setp(path, i.value.trim()));
+  return i;
+}
+function chkCtl(path, cb) {
+  const i = h('input', {type: 'checkbox', checked: !!getp(path)});
+  i.addEventListener('change', () => { setp(path, i.checked); cb && cb(); });
+  return i;
+}
+const F = (label, ctl) => h('label', {class: 'f'}, h('span', {}, label), ctl);
+const FC = (label, ctl) => h('label', {class: 'f chk'}, ctl, h('span', {style: 'font-size:13px;color:var(--tx)'}, label));
+
+
+/* ---------- আংশিক প্রফিট বুকিং (T1/T2) ---------- */
+function lotPlan(L, tg) {
+  if (L < 2) return null;
+  let left = L - 1; const parts = [];
+  const spec = [['T1', tg.t1.qty]].concat(tg.t2.on ? [['T2', tg.t2.qty]] : []);
+  spec.forEach(([tag, q]) => { if (left <= 0) return; const n = Math.max(1, Math.min(Math.floor(L * q / 100 + 0.4999), left)); parts.push([tag, n]); left -= n; });
+  return {parts, runner: L - parts.reduce((a, x) => a + x[1], 0)};
+}
+function tgBlock(c, p) {
+  const tg = c.tg, L = S.general.lots, box = h('div', {class: 'tgbox'});
+  box.append(h('div', {class: 'tgh'}, '🎯 আংশিক প্রফিট বুকিং (Scale-out)'));
+  box.append(FC('চালু: Target ছুঁলে কিছু লট বেচে SL সরান', chkCtl(p + '.tg.on', () => renderBuild())));
+  if (!tg.on) { box.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'যেমন ২ লটে T1-এ ১ লট বেচে SL এন্ট্রিতে আনলে ঝুঁকিহীন রানার বাকি থাকে। লট কমপক্ষে ২ লাগবে।')); return [box]; }
+  box.append(F('টার্গেটের একক', selCtl(p + '.tg.unit', [['pct', '% প্রিমিয়াম'], ['pts', 'পয়েন্ট ₹'], ['rr', 'RR × SL']], () => renderBuild())));
+  box.append(F('Target 1 মান', numCtl(p + '.tg.t1.val', c.name + ' T1', 1)), F('T1-এ কত % লট বেচবেন', numCtl(p + '.tg.t1.qty', c.name + ' T1 লট%', 5)));
+  box.append(F('T1 ছুঁলে SL কোথায় যাবে?', selCtl(p + '.tg.a1.mode', [['none', 'সরবে না'], ['be', 'এন্ট্রিতে (ব্রেকইভেন)'], ['lock', 'এন্ট্রির ওপরে লাভ লক']], () => renderBuild())));
+  if (tg.a1.mode === 'lock') box.append(F('লক লাভ % (এন্ট্রির)', numCtl(p + '.tg.a1.val', c.name + ' লক%', 1)));
+  box.append(FC('Target 2-ও ব্যবহার করুন', chkCtl(p + '.tg.t2.on', () => renderBuild())));
+  if (tg.t2.on) {
+    box.append(F('Target 2 মান (T1-এর চেয়ে বড়)', numCtl(p + '.tg.t2.val', c.name + ' T2', 1)), F('T2-তে কত % লট বেচবেন', numCtl(p + '.tg.t2.qty', c.name + ' T2 লট%', 5)));
+    box.append(F('T2 ছুঁলে SL কোথায় যাবে?', selCtl(p + '.tg.a2.mode', [['none', 'সরবে না'], ['t1', 'T1-এর দামে'], ['be', 'এন্ট্রিতে']])));
+  }
+  const plan = lotPlan(L, tg), lp = h('div', {class: 'lotplan'});
+  if (!plan) lp.append(h('div', {class: 'warn', style: 'flex:1 1 100%;margin:0'}, 'এখন লট ' + L + ' — ভাগ করা যায় না, তাই বুকিং কাজ করবে না। "লট সংখ্যা" কমপক্ষে ২ দিন।'));
+  else {
+    lp.append('লট ' + L + ' →');
+    plan.parts.forEach(([tag, n]) => lp.append(h('span', {class: 'lp ' + tag.toLowerCase()}, tag + ': ' + n + ' লট')));
+    lp.append(h('span', {class: 'lp rn'}, 'রানার: ' + plan.runner + ' লট'));
+    lp.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:2px 0 0'}, 'রানার বাকি লট শেষ টার্গেট / SL / ট্রেইলিং / সিগন্যাল এক্সিট / টাইম স্টপে বেরোয়। প্রতিটি আংশিক বিক্রিতে ব্রোকারেজ আলাদা ধরা হয়। লট পূর্ণসংখ্যায় ভাগ হয়, তাই % আনুমানিক।'));
+  }
+  box.append(lp);
+  return [box];
+}
+
+/* ---------- বিল্ড ট্যাব ---------- */
+const OPEN = (() => { try { return JSON.parse(sessionStorage.getItem('ab_open') || '{}'); } catch (e) { return {}; } })();
+function dtl(key, def, ...kids) {
+  const e = h('details', {class: key.startsWith('case') ? 'card case' : 'card', open: key in OPEN ? OPEN[key] : def}, ...kids);
+  e.addEventListener('toggle', () => { OPEN[key] = e.open; try { sessionStorage.setItem('ab_open', JSON.stringify(OPEN)); } catch (_) {} });
+  return e;
+}
+function renderBuild() {
+  SW = [];
+  const root = $('#t-build');
+  root.innerHTML = '';
+  const G = (k, l, st) => F(l, numCtl('general.' + k, l, st));
+
+  root.append(dtl('gen', true, h('summary', {}, '① সাধারণ সেটিংস'),
+    h('div', {class: 'body'},
+      F('সিগন্যাল কোন চার্টে?', selCtl('general.chart', [['spot', 'স্পট (BankNifty ইনডেক্স)'], ['prem', 'প্রিমিয়াম (অপশনের নিজের চার্ট)']], () => renderBuild())),
+      F('চার্ট টাইমফ্রেম', selCtl('general.tf', CTFS, null, true)),
+      F('লট সংখ্যা', numCtl('general.lots', 'লট সংখ্যা', 1)),
+      F('মূলধন ₹ (DD% এর জন্য)', numCtl('general.capital', 'মূলধন', 1000, true)),
+      F('ডেটা শুরু (YYYY-MM-DD)', txtCtl('general.from', 'খালি = সব')),
+      F('ডেটা শেষ', txtCtl('general.to', 'খালি = সব')),
+      F('Train/Test ভাগ (ঐচ্ছিক)', selCtl('general.split', [[0,'বন্ধ — পুরো ডেটায় ফাইনাল'],[50,'50 / 50'],[60,'60 / 40'],[70,'70 / 30'],[80,'80 / 20']], null, true)),
+      F('এন্ট্রি শুরু (HH:MM)', txtCtl('general.win_from')),
+      F('এন্ট্রি শেষ', txtCtl('general.win_to')),
+      F('স্কয়ার-অফ', txtCtl('general.sqoff')),
+      G('max_trades', 'দিনে সর্বোচ্চ ট্রেড', 1),
+      G('day_loss', 'দৈনিক লস লিমিট ₹ (0=বন্ধ)', 100),
+      G('day_profit', 'দৈনিক প্রফিট লিমিট ₹ (0=বন্ধ)', 100),
+      G('min_dte', 'এক্সপায়ারি কত দিন দূরে (min DTE)', 1),
+      FC('এক্সপায়ারির দিন ট্রেড নয়', chkCtl('general.skip_expiry_day')),
+      FC('নতুন সিগন্যাল লাগবে (শর্ত false→true হলে তবেই এন্ট্রি)', chkCtl('general.fresh')),
+      FC('একই বারে SL ও টার্গেট দুটোই ছুঁলে SL ধরা (রক্ষণশীল)', chkCtl('general.sl_first')))));
+
+  root.append(dtl('cost', false, h('summary', {}, '② খরচ (বাস্তব করুন)'),
+    h('div', {class: 'body'},
+      G('brokerage', 'ব্রোকারেজ ₹/অর্ডার', 1),
+      G('slip', 'স্লিপেজ (প্রিমিয়াম পয়েন্ট/সাইড)', 0.1),
+      G('charges_pct', 'চার্জ % (বিক্রয় টার্নওভারে, আনুমানিক)', 0.01),
+      h('div', {class: 'note', style: 'flex:1 1 100%'}, 'চার্জ % = STT + এক্সচেঞ্জ + GST ইত্যাদির আনুমানিক যোগফল। নিজের ব্রোকারের চার্জ দেখে ঠিক করুন।'))));
+
+  const I = (k, l, parts) => h('div', {class: 'ind'}, h('b', {}, l), ...parts);
+  const ip = (k, f, l, st) => F(l, numCtl('ind.' + k + '.' + f, l + ' [' + k.toUpperCase() + ']', st));
+  const itf = k => F('TF', selCtl('ind.' + k + '.tf', TFS, null, true));
+  const ind = h('div', {class: 'body'});
+  for (const k of ['ma1', 'ma2', 'ma3'])
+    ind.append(I(k, 'Moving Average ' + k.slice(2), [F('টাইপ', selCtl('ind.' + k + '.type', MATYPES)), ip(k, 'len', 'Length', 1), itf(k), F('Source', selCtl('ind.' + k + '.src', PSRC))]));
+  ind.append(I('rsi', 'RSI', [ip('rsi', 'len', 'Length', 1), itf('rsi'), F('Source', selCtl('ind.rsi.src', PSRC))]));
+  ind.append(I('adx', 'ADX / DI', [ip('adx', 'len', 'DI Length', 1), ip('adx', 'smooth', 'Smoothing', 1), itf('adx')]));
+  ind.append(I('atr', 'ATR', [ip('atr', 'len', 'Length', 1), itf('atr')]));
+  for (const k of ['st1', 'st2'])
+    ind.append(I(k, 'Supertrend ' + k.slice(2), [ip(k, 'len', 'Length', 1), ip(k, 'mult', 'Multiplier', 0.5), itf(k)]));
+  ind.append(I('macd', 'MACD', [ip('macd', 'fast', 'Fast', 1), ip('macd', 'slow', 'Slow', 1), ip('macd', 'sig', 'Signal', 1), itf('macd')]));
+  ind.append(I('bb', 'Bollinger Band', [ip('bb', 'len', 'Length', 1), ip('bb', 'mult', 'Multiplier', 0.1), itf('bb'), F('Source', selCtl('ind.bb.src', PSRC))]));
+  ind.append(I('misc', 'অন্যান্য', [ip('orb', 'mins', 'ORB সময় (মিনিট)', 5), ip('vol', 'len', 'Volume SMA Length', 1), ip('don', 'n', 'Highest/Lowest N', 1)]));
+  ind.append(h('div', {class: 'note', style: 'flex:1 1 100%'}, 'উচ্চ TF (যেমন 60m EMA) শুধু সম্পূর্ণ হওয়া বার ধরে, তাই লাইভের চেয়ে একটু পিছিয়ে থাকে (রিপেইন্ট নেই)। ইনডেক্সে ভলিউম না থাকলে VWAP = টাইপিক্যাল প্রাইসের গড়।'));
+  root.append(dtl('ind', false, h('summary', {}, '③ ইন্ডিকেটর প্যারামিটার'), ind));
+
+  S.cases.forEach((c, ci) => root.append(caseCard(ci)));
+  root.append(h('button', {class: 'btn', style: 'width:100%', on: {click: () => {
+    S.cases.push(merge(META.case, {name: 'Case ' + (S.cases.length + 1)})); persist(); renderBuild(); }}}, '＋ নতুন Case যোগ করুন'));
+  renderTune();
+}
+
+function srcSel(path, noNumber) {
+  const s = h('select');
+  let grp = null, gname = '';
+  for (const [id, lb, g] of META.sources) {
+    if (noNumber && id === 'number') continue;
+    if (g !== gname) { grp = h('optgroup', {label: g}); s.append(grp); gname = g; }
+    grp.append(h('option', {value: id}, lb));
+  }
+  s.value = getp(path);
+  return s;
+}
+
+function condRow(cpath, list, i, cname, part) {
+  const p = cpath + '.' + i, sl = list[i];
+  const tag = cname + ' ' + part + '#' + (i + 1);
+  const row = h('div', {class: 'cond' + (sl.on ? '' : ' off')});
+  const on = chkCtl(p + '.on', () => renderBuild());
+  const join = selCtl(p + '.join', [['AND', 'AND'], ['OR', 'OR']]); join.className = 'jn';
+  if (i === 0) join.style.visibility = 'hidden';
+  const L = srcSel(p + '.l', true); L.addEventListener('change', () => setp(p + '.l', L.value));
+  const op = selCtl(p + '.op', META.ops, () => renderBuild());
+  const noR = (sl.op === 'rising' || sl.op === 'falling');
+  const isNum = sl.r === 'number';
+  const R = srcSel(p + '.r', false); R.addEventListener('change', () => { setp(p + '.r', R.value); renderBuild(); });
+  const mini = (label, ctl) => h('label', {class: 'f mini'}, h('span', {}, label), ctl);
+  const ls = numCtl(p + '.ls', tag + ' বাম shift', 1); ls.min = 0;
+  const r3 = h('div', {class: 'r1'}, mini('বাম shift (বার আগে)', ls));
+  if (!noR) {
+    if (!isNum) { const rs = numCtl(p + '.rs', tag + ' ডান shift', 1); rs.min = 0; r3.append(mini('ডান shift', rs)); }
+    r3.append(mini(isNum ? 'সংখ্যা' : 'গুণক ×', isNum ? numCtl(p + '.num', tag + ' সংখ্যা', 'any') : numCtl(p + '.mul', tag + ' গুণক', 0.05)));
+  }
+  r3.append(h('button', {class: 'btn d s', on: {click: () => { list.splice(i, 1); persist(); renderBuild(); }}}, '✕'));
+  row.append(h('div', {class: 'r1'}, on, join, L), h('div', {class: 'r1'}, op, noR ? null : R), r3);
+  return row;
+}
+
+function condBlock(ci, part, title, hint) {
+  const c = S.cases[ci], list = c[part], cpath = 'cases.' + ci + '.' + part;
+  const wrap = h('div', {style: 'flex:1 1 100%;display:flex;flex-direction:column;gap:6px'});
+  wrap.append(h('div', {class: 'sub'}, h('b', {style: 'color:var(--tx)'}, title), h('span', {}, hint)));
+  list.forEach((_, i) => wrap.append(condRow(cpath, list, i, c.name, part === 'entry' ? 'Entry' : 'Exit')));
+  wrap.append(h('button', {class: 'btn s', style: 'align-self:flex-start', on: {click: () => {
+    list.push(merge(META.slot, {join: part === 'exit' ? 'OR' : 'AND'})); persist(); renderBuild(); }}}, '＋ শর্ত যোগ'));
+  return wrap;
+}
+
+function caseCard(ci) {
+  const c = S.cases[ci], p = 'cases.' + ci;
+  const body = h('div', {class: 'body'});
+  body.append(F('Case নাম', txtCtl(p + '.name')),
+    FC('চালু', chkCtl(p + '.on')),
+    F('Action', selCtl(p + '.action', [['BUY', 'BUY (কেনা)'], ['SELL', 'SELL (বিক্রি)']])),
+    F('অপশন', selCtl(p + '.opt', [['CE', 'CE'], ['PE', 'PE']])),
+    F('স্ট্রাইক বাছাই', selCtl(p + '.strike.mode', [['offset', 'ATM / ITM / OTM'], ['prem', 'প্রিমিয়াম কাছাকাছি']], () => renderBuild())));
+  if (c.strike.mode === 'offset') body.append(F('স্ট্রাইক', selCtl(p + '.strike.off', OFFS, null, true)));
+  else body.append(F('প্রিমিয়াম ≈ ₹', numCtl(p + '.strike.prem', c.name + ' প্রিমিয়াম লক্ষ্য', 10)));
+  if (c.strike.mode === 'prem' && S.general.chart === 'prem') body.append(F('প্রিমিয়াম সীমা ± % (সিগন্যালের সময়)', numCtl(p + '.strike.band', 'সীমা %', 5)));
+  body.append(condBlock(ci, 'entry', 'এন্ট্রি শর্ত', 'সিগন্যাল ক্যান্ডেল ক্লোজে, এন্ট্রি পরের বারের ওপেনে'));
+  body.append(condBlock(ci, 'exit', 'এক্সিট শর্ত (ঐচ্ছিক)', 'ফাঁকা = শুধু SL/টার্গেট/স্কয়ার-অফ'));
+  const pr = '(প্রিমিয়ামের উপর)';
+  body.append(h('div', {class: 'sub'}, h('b', {style: 'color:var(--tx)'}, 'SL / টার্গেট ' + pr), h('span', {})));
+  body.append(...[
+    F('Stop Loss', selCtl(p + '.sl.mode', [['none', 'নেই'], ['pct', '% '], ['pts', 'পয়েন্ট']], () => renderBuild())),
+    c.sl.mode !== 'none' ? F('SL মান', numCtl(p + '.sl.val', c.name + ' SL মান', 1)) : null,
+    F('Target', selCtl(p + '.tp.mode', [['none', 'নেই'], ['pct', '%'], ['pts', 'পয়েন্ট'], ['rr', 'RR (×SL)']], () => renderBuild())),
+    c.tp.mode !== 'none' ? F('টার্গেট মান', numCtl(p + '.tp.val', c.name + ' টার্গেট মান', 1)) : null,
+    F('Trailing SL', selCtl(p + '.trail.mode', [['none', 'নেই'], ['step', 'স্টেপ: দাম X সরলে SL Y সরবে'], ['pct', 'পিক থেকে % পিছনে']], () => renderBuild())),
+    c.trail.mode === 'pct' ? F('পিক থেকে দূরত্ব %', numCtl(p + '.trail.val', c.name + ' Trail %', 1)) : null,
+    c.trail.mode === 'pct' ? F('শুরু হবে লাভ ≥ % (0=সাথে সাথে)', numCtl(p + '.trail.act', c.name + ' Trail শুরু %', 1)) : null,
+    c.trail.mode === 'step' ? F('একক', selCtl(p + '.trail.unit', [['pct', '% (এন্ট্রি প্রিমিয়ামের)'], ['pts', 'পয়েন্ট (₹)']], () => renderBuild())) : null,
+    c.trail.mode === 'step' ? F('দাম এগোলে (X)', numCtl(p + '.trail.trig', c.name + ' Trail X', 1)) : null,
+    c.trail.mode === 'step' ? F('SL সরবে (Y)', numCtl(p + '.trail.move', c.name + ' Trail Y', 1)) : null,
+    c.trail.mode === 'step' ? h('div', {class: 'note', style: 'flex:1 1 100%'}, 'উদাহরণ X=10, Y=5: প্রিমিয়াম এন্ট্রি থেকে ১০ এগোলে SL ৫ ওপরে ওঠে, ২০ এগোলে ১০ ওপরে… (শুরুর SL থেকে গোনা)। Y ≤ X রাখুন। হিসাব হয় প্রতিটি বারের শেষে, SL পরের বার থেকে কার্যকর।') : null,
+    FC('Breakeven (লাভ এত % হলে SL = এন্ট্রি)', chkCtl(p + '.be.on', () => renderBuild())),
+    c.be.on ? F('BE ট্রিগার %', numCtl(p + '.be.val', c.name + ' BE %', 1)) : null,
+    F('টাইম স্টপ (মিনিট, 0=বন্ধ)', numCtl(p + '.time_stop', c.name + ' টাইম স্টপ', 5))].filter(Boolean));
+  body.append(...tgBlock(c, p));
+  body.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px'},
+    h('button', {class: 'btn s', on: {click: () => { S.cases.splice(ci + 1, 0, JSON.parse(JSON.stringify(c))); S.cases[ci + 1].name += ' copy'; persist(); renderBuild(); }}}, '⎘ কপি'),
+    h('button', {class: 'btn d s', on: {click: () => { if (S.cases.length > 1 || confirm('শেষ Case মুছবেন?')) { S.cases.splice(ci, 1); persist(); renderBuild(); } }}}, '🗑 মুছুন')));
+  return dtl('case' + ci, ci === 0, h('summary', {}, '④ ' + c.name + ' — ' + c.action + ' ' + c.opt + (c.on ? '' : ' (বন্ধ)')), body);
+}
+
+/* ---------- জব রানার ---------- */
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : undefined);
+  return r.json();
+}
+let BUSY = false;
+let LASTRUN = null;
+async function saveStrategy(name, note) {
+  name = (name || '').trim();
+  if (!name) { alert('স্ট্র্যাটেজির নাম দিন'); return false; }
+  if (META.presets.user[name] && !confirm('"' + name + '" নামে আগেই সেভ আছে। বদলে নতুনটা সেভ করবেন?')) return false;
+  const snap = JSON.parse(JSON.stringify(S));
+  const m = {saved: new Date().toISOString().slice(0, 16).replace('T', ' '), note: (note || '').trim()};
+  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; m.stats = {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), rr: +a.rr.toFixed(2), from: LAST.meta.from, to: LAST.meta.to}; }
+  snap._meta = m;
+  const r = await api('/api/preset/save', {name, settings: snap});
+  META.presets.user = r.user; renderPresets();
+  $('#status').textContent = '✓ সেভ হয়েছে: ' + name;
+  return true;
+}
+async function runJob(payload, label) {
+  if (BUSY) return null;
+  BUSY = true; $('#run').disabled = true;
+  const st = $('#status'), pg = $('#prog');
+  st.textContent = label + ' চলছে…'; pg.style.width = '2%';
+  try {
+    const s = await api('/api/start', payload);
+    if (s.error) throw new Error(s.error);
+    for (;;) {
+      await new Promise(r => setTimeout(r, 500));
+      const j = await api('/api/job?id=' + s.id);
+      pg.style.width = Math.max(2, (j.progress || 0) * 100) + '%';
+      st.textContent = label + ' ' + Math.round((j.progress || 0) * 100) + '%';
+      if (j.status === 'done') { st.textContent = 'শেষ (' + (j.secs || 0).toFixed(1) + ' সেকেন্ড)'; return j.result; }
+      if (j.status === 'error') throw new Error(j.error);
+    }
+  } catch (e) {
+    st.textContent = 'ত্রুটি: ' + e.message;
+    alert('ত্রুটি: ' + e.message);
+    return null;
+  } finally {
+    BUSY = false; $('#run').disabled = false;
+    setTimeout(() => { pg.style.width = '0'; }, 600);
+  }
+}
+
+/* ---------- রেজাল্ট ---------- */
+const inr = x => (x < 0 ? '−' : '') + '₹' + Math.abs(Math.round(x)).toLocaleString('en-IN');
+const cls = x => x > 0 ? 'pos' : (x < 0 ? 'neg' : '');
+const f1 = x => (x == null ? '–' : Number(x).toFixed(1)), f2 = x => (x == null ? '–' : Number(x).toFixed(2));
+const tbl = (head, rows, mh) => h('div', {class: 'scroll', style: 'max-height:' + (mh || 'none'), html: '<table><tr>' + head.map(x => '<th>' + x + '</th>').join('') + '</tr>' + rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</table>'});
+const legTxt = t => t.legs ? t.legs.map(l => l.why.replace('Target', 'TP') + '×' + l.q).join('→') : t.reason;
+const csvVal = (c, v) => c === 'legs' ? (v ? v.map(l => l.why + ' x' + l.q + ' @' + l.px + ' ' + l.t).join(' | ') : '') : String(v);
+const pn = (v, d) => '<span class="' + cls(v) + '">' + (d ? v.toFixed(d) : inr(v)) + '</span>';
+function grpTable(root, title, arr, note) {
+  if (!arr || !arr.length) return;
+  root.append(h('h3', {}, title));
+  root.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'গড় ₹', 'RR', 'DD ₹'],
+    arr.map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), pn(r.exp), f2(r.rr), inr(r.dd)])));
+  if (note) root.append(h('div', {class: 'note'}, note));
+}
+function renderResults(res) {
+  LAST = res;
+  const root = $('#t-res'); root.innerHTML = '';
+  const A = res.stats.all, T = res.stats.train, E = res.stats.test, M = res.meta, N = res.an || {};
+  if (!A.n) {
+    root.append(h('div', {class: 'warn'}, 'কোনো ট্রেড হয়নি। শর্ত কড়া হতে পারে, বা সময়সীমা/ডেটা মেলেনি। ' + JSON.stringify(M.skipped)));
+    return;
+  }
+  const kp = (l, v, c) => h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v));
+  root.append(h('div', {class: 'note', style: 'margin-top:0'}, 'ফাইনাল ফল: পুরো ডেটা ' + M.from + ' → ' + M.to + ' (' + M.days + ' দিন), একবারে চালানো।'));
+  (M.warn || []).forEach(w => root.append(h('div', {class: 'warn'}, '⚠ ' + w)));
+  const sn = h('input', {type: 'text', placeholder: 'নাম (যেমন: BB Breakout v3)'}), sno = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
+  root.append(h('details', {class: 'card'}, h('summary', {}, '💾 এই স্ট্র্যাটেজি সেভ করুন'), h('div', {class: 'body'}, F('নাম', sn), F('নোট', sno),
+    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(sn.value, sno.value)}}, 'সেভ'),
+    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সব সেটিং আর এই ফলাফলের সারাংশ সেভ হবে। পরে "প্রিসেট" ট্যাব থেকে লোড করবেন।'))));
+  const hero = h('div', {class: 'kpi hero ' + (A.net >= 0 ? 'up' : 'dn')}, h('small', {}, 'নেট P&L'), h('b', {class: cls(A.net)}, inr(A.net)),
+    h('div', {class: 'hsub'}, [['ট্রেড', A.n], ['Win', A.win.toFixed(1) + '%'], ['PF', f2(A.pf)], ['Max DD', A.dd_pct.toFixed(1) + '%']].map(([k, v]) => h('span', {}, k + ' ', h('i', {}, String(v))))));
+  root.append(h('div', {class: 'kpis'},
+    hero, kp('Profit Factor', f2(A.pf)),
+    kp('Win %', A.win.toFixed(1) + '%'), kp('ট্রেড', A.n),
+    kp('Max Drawdown', inr(A.dd) + ' (' + A.dd_pct.toFixed(1) + '%)', 'neg'), kp('RR (গড় লাভ ÷ গড় লস)', f2(A.rr)),
+    kp('গড় ট্রেড (Expectancy)', inr(A.exp), cls(A.exp)), kp('Recovery (নেট ÷ DD)', f2(A.rec)),
+    kp('লাভজনক মাস', A.pm.toFixed(0) + '% (' + A.nm + ' মাসে)'), kp('মোট খরচ', inr(A.costs))));
+  if (A.n < 100) root.append(h('div', {class: 'warn'}, 'ট্রেড মাত্র ' + A.n + 'টি। ১০০-র কম ট্রেডের ফলে ভরসা কম, ভাগ্যের প্রভাব বেশি থাকে।'));
+  else if (A.pm < 50 && A.net > 0) root.append(h('div', {class: 'warn'}, 'নেট লাভ আছে, কিন্তু অর্ধেকের কম মাস লাভে। লাভ হয়তো কয়েকটা বড় ট্রেডের ওপর নির্ভর করছে।'));
+  root.append(h('h3', {}, 'ইকুইটি কার্ভ'));
+  root.append(h('canvas', {id: 'eq'}));
+  root.append(h('h3', {}, 'ড্রডাউন কার্ভ'));
+  root.append(h('canvas', {id: 'ddc'}));
+  const row = (n, v) => [n, v];
+  root.append(h('h3', {}, 'পুরো পরিসংখ্যান'));
+  root.append(tbl(['মেট্রিক', 'মান'], [
+    row('মোট ট্রেড / দিনে গড়', A.n + ' / ' + f2((N.days || {}).tpd)),
+    row('Gross P&L (খরচের আগে)', pn(A.gross)), row('মোট খরচ', inr(A.costs)), row('নেট P&L', pn(A.net)),
+    row('Profit Factor', f2(A.pf)), row('Win %', A.win.toFixed(1) + '%'),
+    row('গড় লাভ', inr(A.avg_w)), row('গড় লস', inr(A.avg_l)), row('RR (লাভ ÷ লস)', f2(A.rr)),
+    row('গড় R (SL ঝুঁকির গুণিতক)', A.avg_r == null ? 'SL নেই' : f2(A.avg_r) + 'R'),
+    row('Expectancy প্রতি ট্রেড', pn(A.exp)), row('সেরা / খারাপ ট্রেড', inr(A.best) + ' / ' + inr(A.worst)),
+    row('টানা জয় / টানা হার (সর্বোচ্চ)', A.mcw + ' / ' + A.mcl),
+    row('গড় হোল্ডিং সময়', A.hold.toFixed(0) + ' মিনিট'),
+    row('Max Drawdown', inr(A.dd) + ' (' + A.dd_pct.toFixed(1) + '% মূলধনের)'),
+    row('সবচেয়ে লম্বা DD (ট্রেড সংখ্যা)', A.dd_len), row('Recovery Factor', f2(A.rec))]));
+  const D = N.days, I = N.dd_info;
+  if (I) root.append(tbl(['ড্রডাউন ও দিন', ''], [
+    ['সবচেয়ে বড় DD', pn(I.max) + ' (' + I.pct.toFixed(1) + '%)'],
+    ['শিখর → তলা', (I.peak_date || '–') + ' → ' + I.trough_date],
+    ['ঘুরে দাঁড়ানো', I.recovered ? I.rec_date : 'এখনও পুরোপুরি হয়নি'],
+    ['ওই DD-তে ট্রেড', I.trades_in_dd],
+    ['ট্রেড হওয়া দিন / লাভজনক দিন %', D.n + ' / ' + D.win.toFixed(0) + '%'],
+    ['সেরা / খারাপ দিন', inr(D.best) + ' / ' + inr(D.worst)],
+    ['টানা লস দিন (সর্বোচ্চ)', D.mcl]]));
+  if (M.split_date) {
+    root.append(h('h3', {}, 'Train / Test যাচাই (ঐচ্ছিক)'));
+    root.append(tbl(['', 'Train', 'Test'], [['ট্রেড', T.n, E.n], ['নেট', pn(T.net), pn(E.net)], ['PF', f2(T.pf), f2(E.pf)], ['Win%', T.win.toFixed(0) + '%', E.win.toFixed(0) + '%'], ['DD', inr(T.dd), inr(E.dd)]]));
+    root.append(h('div', {class: 'note'}, 'এটা শুধু যাচাইয়ের জন্য। বিভাজন তারিখ: ' + M.split_date + '। বন্ধ করতে সেটিংসে "Train/Test ভাগ" বন্ধ করুন।'));
+  }
+  grpTable(root, '⏰ টাইমিং: এন্ট্রির সময় (৩০ মিনিটের স্লট)', N.by_slot, 'কোন সময়ে এন্ট্রি লাভ/লস দিচ্ছে। খারাপ স্লট বাদ দিতে "এন্ট্রি শুরু/শেষ" বদলান।');
+  grpTable(root, 'সপ্তাহের দিন', N.by_dow);
+  grpTable(root, 'এক্সিটের কারণ', N.by_reason, 'SL-এ যাওয়া ট্রেড বেশি খারাপ হলে SL ঢিলে বা এন্ট্রি আরও বাছাই করুন।');
+  grpTable(root, 'Case অনুযায়ী', N.by_case);
+  grpTable(root, 'CE / PE', N.by_type);
+  grpTable(root, 'এক্সপায়ারি থেকে দূরত্ব (DTE)', N.by_dte);
+  grpTable(root, 'হোল্ডিং সময়', N.by_hold);
+  grpTable(root, 'এন্ট্রির প্রিমিয়াম (₹)', N.by_prem);
+  const X = N.exc, W = N.whatif;
+  if (X && W) {
+    root.append(h('h3', {}, '🎯 SL / টার্গেট / ট্রেইল ঠিক করার প্যানেল'));
+    root.append(h('div', {class: 'note'}, 'MAE = ট্রেডে এন্ট্রির তুলনায় সবচেয়ে বেশি উল্টো যাওয়া, MFE = সবচেয়ে বেশি অনুকূলে যাওয়া (প্রিমিয়ামের %)।'));
+    const q = a => a.map(v => v.toFixed(1) + '%');
+    root.append(tbl(['', 'মধ্যম', '৭৫%', '৯০%', 'সর্বোচ্চ'], [
+      ['জেতা ট্রেডের MAE (' + X.nw + 'টি)'].concat(q(X.mae_w)), ['হারা ট্রেডের MAE (' + X.nl + 'টি)'].concat(q(X.mae_l))]));
+    root.append(h('div', {class: 'note'}, 'SL-এর নিয়ম: জেতা ট্রেডের ৯০% MAE-র একটু বাইরে SL রাখলে বেশিরভাগ জেতা ট্রেড টিকে থাকে।'));
+    root.append(tbl(['', '২৫%', 'মধ্যম', '৭৫%', '৯০%'], [
+      ['জেতা ট্রেডের MFE'].concat(q(X.mfe_w)), ['হারা ট্রেডের MFE'].concat(q(X.mfe_l))]));
+    root.append(h('div', {class: 'note'}, 'লাভ ফেরত যাওয়া (জেতা ট্রেডে শিখর থেকে নামা): মধ্যম ' + X.give_med.toFixed(1) + '%, গড় ' + X.give_avg.toFixed(1) + '% → ট্রেইলিং SL এর আশেপাশে রাখা যায়। হারা ট্রেডের ' + X.l_touch['10'].toFixed(0) + '% একসময় +১০% ছুঁয়েছিল, ' + X.l_touch['20'].toFixed(0) + '% +২০% ছুঁয়েছিল (ব্রেকইভেন/ট্রেইল কাজে লাগতে পারে)।'));
+    root.append(h('h3', {}, 'শুধু SL বদলালে নেট কী হতো (আনুমানিক)'));
+    root.append(tbl(['SL %', 'কাটা ট্রেড', 'নেট ₹', 'PF', 'Win%'], [['এখন', '–', pn(W.now.net), f2(W.now.pf), W.now.win.toFixed(0) + '%']].concat(W.sl.map(r => [r.v + '%', r.cut, pn(r.net), f2(r.pf), r.win.toFixed(0) + '%']))));
+    root.append(h('h3', {}, 'শুধু টার্গেট বদলালে (আনুমানিক)'));
+    root.append(tbl(['TP %', 'নেট ₹', 'PF', 'Win%'], W.tp.map(r => [r.v + '%', pn(r.net), f2(r.pf), r.win.toFixed(0) + '%'])));
+    const g = W.grid;
+    root.append(h('h3', {}, 'SL × টার্গেট গ্রিড (নেট ₹, আনুমানিক)'));
+    let mx = -1e18, mxi = [0, 0]; g.net.forEach((r, i) => r.forEach((v, j) => { if (v > mx) { mx = v; mxi = [i, j]; } }));
+    root.append(tbl(['SL \\ TP'].concat(g.tps.map(x => x + '%')), g.net.map((r, i) => [g.sls[i] + '%'].concat(r.map((v, j) => '<span class="' + cls(v) + '"' + (i === mxi[0] && j === mxi[1] ? ' style="font-weight:700;text-decoration:underline"' : '') + '>' + v + '</span>')))));
+    root.append(h('div', {class: 'note'}, 'এগুলো ট্রেডের MAE/MFE থেকে হিসাব করা অনুমান। একই বারে SL ও TP দুটোই ছুঁলে SL ধরা হয়, আর SL/TP-তে আগে বেরোলে পরের ট্রেডের সময় বদলাতে পারে। তাই ভালো মানগুলো সেটিংসে বসিয়ে আসল Run দিয়ে (বা টিউনিং দিয়ে) নিশ্চিত করুন।'));
+  }
+  const sk = Object.entries(M.skipped).filter(([, v]) => v > 0);
+  if (sk.length) root.append(h('div', {class: 'note'}, 'বাদ পড়া সিগন্যাল: ' + sk.map(([k, v]) => k + ' ' + v).join(', ')));
+  const per = (arr, ttl) => {
+    root.append(h('h3', {}, ttl));
+    root.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'DD ₹'], arr.map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), inr(r.dd)]), '360px'));
+  };
+  per(res.yearly, 'বছর অনুযায়ী'); per(res.monthly, 'মাস অনুযায়ী');
+  root.append(h('h3', {}, 'ট্রেড তালিকা'));
+  const jn = h('input', {type: 'number', inputmode: 'numeric', placeholder: 'ট্রেড নং (১ থেকে ' + res.trades.length + ')', style: 'flex:1'});
+  root.append(h('div', {style: 'display:flex;gap:6px;align-items:center'}, jn,
+    h('button', {class: 'btn p s', on: {click: () => { const n = parseInt(jn.value); if (n >= 1 && n <= res.trades.length) openChart(n - 1); else alert('১ থেকে ' + res.trades.length + ' এর মধ্যে নম্বর দিন'); }}}, '📈 চার্ট দেখুন'),
+    h('button', {class: 'btn s', on: {click: dlCsv}}, '⬇ CSV')));
+  root.append(h('div', {class: 'note'}, 'যেকোনো ট্রেডের সারিতে ট্যাপ করলে সেই দিনের স্পট ও প্রিমিয়াম চার্ট খুলবে।'));
+  const tb = h('div', {class: 'scroll', style: 'margin-top:6px;max-height:520px', html: '<table><tr><th>#</th><th>তারিখ</th><th>ট্রেড</th><th>ইন</th><th>আউট</th><th>এন্ট্রি</th><th>এক্সিট</th><th>কারণ</th><th>MAE%</th><th>MFE%</th><th>R</th><th>নেট ₹</th></tr>' +
+    res.trades.map((t, k) => '<tr data-i="' + k + '" style="cursor:pointer"><td>' + (k + 1) + '</td><td>' + t.date + '</td><td>' + t.side + '</td><td>' + t.in + '</td><td>' + t.out + '</td><td>' + t.entry + '</td><td>' + t.exit + '</td><td>' + legTxt(t) + '</td><td>' + t.mae + '</td><td>' + t.mfe + '</td><td>' + (t.r == null ? '–' : t.r) + '</td><td class="' + cls(t.net) + '">' + Math.round(t.net) + '</td></tr>').join('') + '</table>'});
+  tb.addEventListener('click', e => { const r = e.target.closest('tr[data-i]'); if (r) openChart(parseInt(r.dataset.i)); });
+  root.append(tb);
+}
+/* ---------- একটি ট্রেডের চার্ট (স্পট + প্রিমিয়াম) ---------- */
+const COLS = ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'];
+function hmOf(t) { const d = new Date(t * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }
+/* ---------- চার্ট (নতুন): পিঞ্চ-জুম, ক্রসহেয়ার, সিঙ্ক ---------- */
+let CH = {i: 0};
+const CHS = {view: 'both', hide: {}};
+const CU = '#26c281', CD = '#ff5d5d';
+function fnum(x, rg) { if (x == null || !isFinite(x)) return '–'; return x.toFixed(rg > 80 ? 0 : rg > 6 ? 1 : 2); }
+function niceStep(span) { for (const s of [300, 600, 900, 1800, 3600, 7200]) if (span / s <= 6.5) return s; return 7200; }
+function setupCv(cv, W, H) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv._w = W; cv._h = H; cv._dpr = dpr; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+}
+function pill(g, txt, x, y, bg, fg, align) {
+  g.font = 'bold 10px sans-serif'; const w = g.measureText(txt).width + 8;
+  const x1 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  g.fillStyle = bg; g.beginPath(); (g.roundRect ? g.roundRect(x1, y - 8, w, 16, 4) : g.rect(x1, y - 8, w, 16)); g.fill();
+  g.fillStyle = fg || '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, x1 + w / 2, y + 0.5);
+}
+function drawPane(cv, o, R) {
+  const dpr = cv._dpr, W = cv._w, H = cv._h, g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const padR = 52, padT = 24, padB = o.last ? 20 : 6, x0 = 2, a = R.a, b = R.b;
+  const X = t => x0 + (t - a) / (b - a) * (W - padR - x0);
+  const vis = t => t >= a - 900 && t <= b + 900;
+  let vals = [];
+  (o.bars || []).forEach(k => { if (vis(k.t)) vals.push(k.h, k.l); });
+  (o.lines || []).forEach(L => { if (!L.hide) L.data.forEach(p => { if (vis(p.t)) vals.push(p.v); }); });
+  (o.hl || []).forEach(v => vals.push(v)); (o.hlines || []).forEach(L => vals.push(L.v));
+  g.fillStyle = '#10151d'; g.fillRect(0, 0, W, H);
+  if (!vals.length) { g.fillStyle = '#8b96a8'; g.font = '11px sans-serif'; g.fillText(o.title + ' — এই অংশে ডেটা নেই', 8, 14); return; }
+  let mn = Math.min(...vals), mx = Math.max(...vals); if (mx === mn) { mx += 1; mn -= 1; }
+  const rg = mx - mn, pd = rg * 0.07; mn -= pd; mx += pd;
+  const Y = v => padT + (H - padT - padB) * (1 - (v - mn) / (mx - mn));
+  const dec = (mx - mn);
+  g.font = '10px sans-serif'; g.textBaseline = 'middle';
+  for (let k = 0; k <= 4; k++) {
+    const v = mn + (mx - mn) * k / 4, y = Y(v);
+    g.strokeStyle = '#1c2431'; g.lineWidth = 1; g.beginPath(); g.moveTo(x0, y); g.lineTo(W - padR, y); g.stroke();
+    g.fillStyle = '#7d889b'; g.textAlign = 'left'; g.fillText(fnum(v, dec), W - padR + 5, y);
+  }
+  const ts = niceStep(b - a);
+  for (let t = Math.ceil(a / ts) * ts; t <= b; t += ts) {
+    const x = X(t); g.strokeStyle = '#1c2431'; g.beginPath(); g.moveTo(x, padT); g.lineTo(x, H - padB); g.stroke();
+    if (o.last) { g.fillStyle = '#7d889b'; g.textAlign = 'center'; g.fillText(hmOf(t), x, H - 8); }
+  }
+  // ট্রেডের সময়কাল ও SL/টার্গেট জোন
+  if (o.zone) {
+    const xa = X(o.zone.a), xb = X(o.zone.b);
+    g.fillStyle = o.zone.color; g.fillRect(xa, padT, Math.max(xb - xa, 1), H - padT - padB);
+    (o.bands || []).forEach(bd => { g.fillStyle = bd.color; const y1 = Y(bd.v1), y2 = Y(bd.v2); g.fillRect(xa, Math.min(y1, y2), Math.max(xb - xa, 1), Math.abs(y2 - y1)); });
+  }
+  (o.hl || []).forEach(v => { g.strokeStyle = '#4d5a70'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(x0, Y(v)); g.lineTo(W - padR, Y(v)); g.stroke(); g.setLineDash([]); g.fillStyle = '#7d889b'; g.textAlign = 'left'; g.fillText(v, W - padR + 5, Y(v) - 8); });
+  // BB ব্যান্ড ফিল
+  const up = (o.lines || []).find(L => L.name === 'BB Upper' && !L.hide), lo = (o.lines || []).find(L => L.name === 'BB Lower' && !L.hide);
+  if (up && lo && up.data.length === lo.data.length) {
+    g.fillStyle = 'rgba(86,182,194,.09)'; g.beginPath();
+    up.data.forEach((p, i) => { const x = X(p.t + o.lstep / 2); i ? g.lineTo(x, Y(p.v)) : g.moveTo(x, Y(p.v)); });
+    for (let i = lo.data.length - 1; i >= 0; i--) g.lineTo(X(lo.data[i].t + o.lstep / 2), Y(lo.data[i].v));
+    g.closePath(); g.fill();
+  }
+  // ক্যান্ডেল
+  (o.bars || []).forEach(k => {
+    if (!vis(k.t)) return;
+    const upc = k.c >= k.o, col = upc ? CU : CD, xc = X(k.t + o.step / 2), w = Math.max(1, (X(k.t + o.step) - X(k.t)) * 0.7);
+    g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(xc, Y(k.h)); g.lineTo(xc, Y(k.l)); g.stroke();
+    const y1 = Y(Math.max(k.o, k.c)), y2 = Y(Math.min(k.o, k.c)); g.fillRect(xc - w / 2, y1, w, Math.max(1, y2 - y1));
+  });
+  // ইন্ডিকেটর লাইন
+  (o.lines || []).forEach((L, i) => {
+    if (L.hide) return;
+    g.strokeStyle = L.color || COLS[i % COLS.length]; g.lineWidth = 1.6; g.lineJoin = 'round'; g.beginPath(); let first = true, last = null;
+    L.data.forEach(p => { const x = X(p.t + o.lstep / 2), y = Y(p.v); if (first || (last !== null && p.t - last > o.lstep * 3)) g.moveTo(x, y); else g.lineTo(x, y); first = false; last = p.t; }); g.stroke();
+  });
+  // এন্ট্রি / SL / টার্গেট লেভেল
+  (o.hlines || []).forEach(L => {
+    g.strokeStyle = L.color; g.setLineDash([6, 3]); g.lineWidth = 1.1; g.beginPath(); g.moveTo(x0, Y(L.v)); g.lineTo(W - padR, Y(L.v)); g.stroke(); g.setLineDash([]);
+    pill(g, fnum(L.v, 0.1), W - padR + 1, Y(L.v), L.color, '#0b0f14', 'left');
+    g.fillStyle = L.color; g.font = '10px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(L.name, x0 + 4, Y(L.v) - 7);
+  });
+  // এন্ট্রি → এক্সিট সংযোগ ও মার্কার
+  const mi = (o.marks || []).find(m => m.k === 'in'), mo = (o.marks || []).find(m => m.k === 'out');
+  if (mi && mo) { g.strokeStyle = mo.win ? CU : CD; g.setLineDash([3, 3]); g.lineWidth = 1.4; g.beginPath(); g.moveTo(X(mi.t + o.step / 2), Y(mi.p)); g.lineTo(X(mo.t + o.step / 2), Y(mo.p)); g.stroke(); g.setLineDash([]); }
+  (o.marks || []).forEach(m => {
+    if (m.k === 'part') { const px_ = X(m.t + o.step / 2), py_ = Y(m.p); g.fillStyle = '#f5c542'; g.beginPath(); g.moveTo(px_, py_ - 6); g.lineTo(px_ + 6, py_); g.lineTo(px_, py_ + 6); g.lineTo(px_ - 6, py_); g.closePath(); g.fill();
+      pill(g, m.why + ' ×' + m.q + ' ' + fnum(m.p, 100), Math.min(Math.max(px_, 46), W - padR - 46), py_ - 20, '#f5c542', '#0b0f14', 'center'); return; }
+    const x = X(m.t + o.step / 2), y = Y(m.p), inn = m.k === 'in', col = inn ? '#4f9cff' : (m.win ? CU : CD);
+    g.fillStyle = col; g.beginPath();
+    if (inn) { g.moveTo(x, y + 3); g.lineTo(x - 6, y + 13); g.lineTo(x + 6, y + 13); } else { g.moveTo(x, y - 3); g.lineTo(x - 6, y - 13); g.lineTo(x + 6, y - 13); }
+    g.closePath(); g.fill();
+    pill(g, (inn ? 'IN ' : 'OUT ') + fnum(m.p, 100), Math.min(Math.max(x, 36), W - padR - 36), inn ? y + 25 : y - 25, col, '#0b0f14', 'center');
+  });
+  // শিরোনাম + লেজেন্ড (ট্যাপ করলে লুকায়/দেখায়)
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic'; let lx = 6; o._leg = [];
+  g.font = 'bold 11px sans-serif'; g.fillStyle = '#e8ebf0'; g.fillText(o.title, lx, 14); lx += g.measureText(o.title).width + 10; g.font = '10px sans-serif';
+  (o.lines || []).forEach((L, i) => {
+    const col = L.color || COLS[i % COLS.length], t = '● ' + L.name, w = g.measureText(t).width;
+    if (L.name) { g.fillStyle = L.hide ? '#4d5a70' : col; g.fillText(t, lx, 14); o._leg.push({n: L.name, a: lx - 3, b: lx + w + 3}); lx += w + 10; }
+  });
+  // ক্রসহেয়ার
+  if (R.cx != null) {
+    const x = X(R.cx);
+    if (x >= x0 && x <= W - padR) {
+      g.strokeStyle = '#9aa7bb'; g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, padT); g.lineTo(x, H - padB); g.stroke();
+      if (R.cy != null && R.cid === o.id) {
+        g.beginPath(); g.moveTo(x0, R.cy); g.lineTo(W - padR, R.cy); g.stroke();
+        const v = mn + (mx - mn) * (1 - (R.cy - padT) / (H - padT - padB));
+        g.setLineDash([]); pill(g, fnum(v, dec), W - padR + 1, R.cy, '#3a4658', '#fff', 'left');
+      }
+      g.setLineDash([]);
+      if (o.last) pill(g, hmOf(R.cx), x, H - 9, '#3a4658', '#fff', 'center');
+    }
+  }
+  g.setLineDash([]);
+}
+async function openChart(i) {
+  if (!LAST || !LAST.trades.length) return;
+  i = Math.max(0, Math.min(LAST.trades.length - 1, i)); CH.i = i;
+  let ov = $('#chOv'); if (!ov) { ov = h('div', {id: 'chOv', style: 'position:fixed;inset:0;background:#0b0f14;z-index:30;overflow:auto;-webkit-overflow-scrolling:touch'}); document.body.append(ov); }
+  ov.innerHTML = ''; ov.hidden = false;
+  const T = LAST.trades[i], N = LAST.trades.length, win = T.net > 0;
+  const nav = h('div', {style: 'position:sticky;top:0;z-index:6;background:#0b0f14ee;border-bottom:1px solid #2a3445;padding:8px 10px;display:flex;gap:6px;align-items:center'},
+    h('button', {class: 'btn s', on: {click: () => openChart(i - 1)}}, '◀'),
+    h('div', {style: 'flex:1;text-align:center;line-height:1.2'}, h('b', {}, 'ট্রেড #' + (i + 1) + ' / ' + N), h('div', {style: 'font-size:11px;color:#8b96a8'}, T.date + ' (' + T.dow + ') · ' + T.case)),
+    h('button', {class: 'btn s', on: {click: () => openChart(i + 1)}}, '▶'),
+    h('button', {class: 'btn s', on: {click: () => { const e = ov; if (document.fullscreenElement) document.exitFullscreen(); else if (e.requestFullscreen) e.requestFullscreen().catch(() => {}); }}}, '⤢'),
+    h('button', {class: 'btn s d', on: {click: () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); ov.hidden = true; window.removeEventListener('resize', ov._rs || (() => {})); }}}, '✕'));
+  ov.append(nav);
+  const pc = win ? '#26c281' : '#ff5d5d';
+  ov.append(h('div', {style: 'margin:8px 10px;padding:10px 12px;border:1px solid #2a3445;border-left:4px solid ' + pc + ';border-radius:10px;background:#131922'},
+    h('div', {style: 'display:flex;justify-content:space-between;align-items:baseline;gap:8px'},
+      h('span', {style: 'font-weight:600'}, T.side), h('b', {style: 'font-size:20px;color:' + pc}, inr(T.net))),
+    h('div', {style: 'font-size:12px;color:#8b96a8;margin-top:4px'}, 'এক্সপায়ারি ' + T.expiry + ' · DTE ' + T.dte),
+    h('div', {style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:8px'},
+      [['ইন', T.in + ' @ ' + T.entry], ['আউট', T.out + ' @ ' + T.exit], ['কারণ', T.reason], ['হোল্ড', T.hold + ' মি'], ['MAE', T.mae + '%'], ['MFE', T.mfe + '%'], ['R', T.r == null ? '–' : T.r]]
+        .map(([k, v]) => h('span', {style: 'font-size:11px;background:#1b2330;border:1px solid #2a3445;border-radius:6px;padding:2px 7px'}, k + ' ', h('b', {}, String(v))))),
+    T.legs ? h('div', {style: 'margin-top:8px;font-size:11px;color:#8b96a8'}, 'আংশিক বুকিং: ', T.legs.map(l => h('span', {style: 'display:inline-block;margin:2px 6px 0 0;background:#1b2330;border:1px solid #2a3445;border-radius:6px;padding:2px 7px;color:#e8ebf0'}, l.why + ' ×' + l.q + ' লট @ ' + l.px + ' (' + l.t + ')'))) : null));
+  const loading = h('div', {class: 'note', style: 'margin:10px'}, 'চার্ট লোড হচ্ছে...'); ov.append(loading);
+  let d;
+  try { d = await api('/api/chart', {settings: JSON.parse(LASTRUN || JSON.stringify(S)), date: T.date, side: T.side, expiry: T.expiry, in: T.in, out: T.out, entry: T.entry, exit: T.exit, case: T.case, legs: T.legs}); } catch (e) { d = {error: String(e)}; }
+  loading.remove();
+  if (d.error) { ov.append(h('div', {class: 'warn', style: 'margin:10px'}, 'চার্ট আনা যায়নি: ' + d.error)); return; }
+  const t0 = d.spot[0].t, t1 = t0 + 375 * 60, full = t1 - t0, base = d.base * 60, tfs = d.tf * 60;
+  const mIn = d.marks.prem.find(m => m.k === 'in'), mOut = d.marks.prem.find(m => m.k === 'out');
+  const R = {a: t0, b: t1, cx: null, cy: null, cid: null};
+  const zone = mIn && mOut ? {a: mIn.t, b: mOut.t + base, color: win ? 'rgba(38,194,129,.07)' : 'rgba(255,93,93,.07)'} : null;
+  const lv = nm => (d.lines || []).find(l => l.name === nm);
+  const bands = [];
+  if (lv('এন্ট্রি') && lv('SL')) bands.push({v1: lv('এন্ট্রি').v, v2: lv('SL').v, color: 'rgba(255,93,93,.10)'});
+  if (lv('এন্ট্রি') && lv('টার্গেট')) bands.push({v1: lv('এন্ট্রি').v, v2: lv('টার্গেট').v, color: 'rgba(38,194,129,.10)'});
+  const ctl = h('div', {style: 'display:flex;gap:6px;flex-wrap:wrap;margin:0 10px 8px'});
+  ov.append(ctl);
+  const info = h('div', {style: 'margin:0 10px 8px;min-height:88px;font-size:12px;line-height:1.5;background:#131922;border:1px solid #2a3445;border-radius:8px;padding:6px 9px;color:#c7d0de'}, 'চার্টে আঙুল রাখুন বা টানুন: ক্রসহেয়ার ও মান দেখাবে। দুই আঙুলে জুম/সরানো, ডবল-ট্যাপে পুরো দিন। ওপরের নামে ট্যাপ করলে ইন্ডিকেটর লুকাবে।');
+  ov.append(info);
+  const box = h('div', {style: 'position:relative;margin:0 0 6px;touch-action:pan-y;user-select:none;-webkit-user-select:none'}); ov.append(box);
+  let panes = [];
+  const mk = (id, h_, o) => { const cv = h('canvas', {style: 'display:block;border-bottom:1px solid #1c2431;touch-action:pan-y'}); cv._id = id; cv._H = h_; cv._o = o; return cv; };
+  const lines = (arr, tag) => (arr || []).map(x => ({name: x.name, data: x.data, hide: !!CHS.hide[tag + x.name], tag}));
+  function build() {
+    box.innerHTML = ''; panes = [];
+    const v = CHS.view, single = v !== 'both', Hm = single ? 330 : 250;
+    const list = [];
+    if (v !== 'prem') {
+      list.push(['spot', Hm, {title: 'স্পট ' + d.tf + 'm', bars: d.spot, step: tfs, lstep: tfs, lines: lines(d.overlays, 's:'), zone, marks: d.marks.spot.map(m => Object.assign({win}, m))}]);
+      (d.panes || []).forEach((p, k) => list.push(['sp' + k, 110, {title: p.name, step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
+    }
+    if (v !== 'spot' && d.prem.length) {
+      list.push(['prem', Hm, {title: 'প্রিমিয়াম ' + T.side.replace(/^BUY |^SELL /, '') + (d.pmode ? ' · ' + d.tf + 'm সিগন্যাল' : ''), bars: d.prem, step: base, lstep: tfs, lines: lines(d.pov, 'p:'), hlines: d.lines, zone, bands, marks: d.marks.prem.map(m => Object.assign({win}, m))}]);
+      (d.ppan || []).forEach((p, k) => list.push(['pp' + k, 110, {title: p.name + ' (প্রিমিয়াম)', step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
+    }
+    if (v !== 'spot' && !d.prem.length) box.append(h('div', {class: 'warn', style: 'margin:10px'}, 'এই কন্ট্র্যাক্টের প্রিমিয়াম ডেটা পাওয়া যায়নি।'));
+    list.forEach(([id, H_, o], k) => { o.id = id; o.last = k === list.length - 1; const cv = mk(id, H_, o); box.append(cv); panes.push(cv); });
+    resize();
+  }
+  function resize() { const W = Math.max(box.clientWidth, 200); panes.forEach(cv => setupCv(cv, W, cv._H)); redraw(); }
+  let raf = 0;
+  function redraw() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; panes.forEach(cv => drawPane(cv, cv._o, R)); }); }
+  const plotW = () => (panes[0] ? panes[0]._w : 300) - 52 - 2;
+  const tAt = x => R.a + (x - 2) / plotW() * (R.b - R.a);
+  function setRange(a, b) {
+    const minS = Math.max(base * 6, 1080); let span = Math.min(Math.max(b - a, minS), full);
+    const c = (a + b) / 2; a = c - span / 2; b = c + span / 2;
+    if (a < t0) { b += t0 - a; a = t0; } if (b > t1) { a -= b - t1; b = t1; }
+    R.a = Math.max(a, t0); R.b = Math.min(b, t1); redraw();
+  }
+  const fitDay = () => setRange(t0, t1);
+  const fitTrade = () => { if (mIn && mOut) setRange(mIn.t - 40 * 60, mOut.t + 40 * 60); };
+  const zoom = k => { const c = (R.a + R.b) / 2, s = (R.b - R.a) * k / 2; setRange(c - s, c + s); };
+  const pan = k => { const s = (R.b - R.a) * k; setRange(R.a + s, R.b + s); };
+  const chip = (txt, fn, on) => h('button', {class: 'btn s', style: on ? 'background:#4f9cff;border-color:#4f9cff;color:#fff' : '', on: {click: fn}}, txt);
+  function drawCtl() {
+    ctl.innerHTML = '';
+    [['both', 'দুটোই'], ['spot', 'স্পট'], ['prem', 'প্রিমিয়াম']].forEach(([k, t]) => ctl.append(chip(t, () => { CHS.view = k; drawCtl(); build(); }, CHS.view === k)));
+    ctl.append(chip('পুরো দিন', fitDay), chip('ট্রেডে ফোকাস', fitTrade), chip('＋', () => zoom(0.6)), chip('－', () => zoom(1.6)), chip('⟵', () => pan(-0.3)), chip('⟶', () => pan(0.3)));
+  }
+  const find = (arr, t, step) => arr.find(k => t >= k.t && t < k.t + step);
+  function showInfo(t) {
+    const a = find(d.spot, t, tfs), b = find(d.prem, t, base), rows = [];
+    const cl = (x, rg) => x ? 'O ' + fnum(x.o, rg) + ' H ' + fnum(x.h, rg) + ' L ' + fnum(x.l, rg) + ' C ' + fnum(x.c, rg) : '–';
+    const colr = x => x ? (x.c >= x.o ? CU : CD) : '#8b96a8';
+    const sp = h('div', {}, h('b', {}, hmOf(t) + '  '), 'স্পট ', h('span', {style: 'color:' + colr(a)}, cl(a, 100)));
+    const pr = h('div', {}, 'প্রিমিয়াম ', h('span', {style: 'color:' + colr(b)}, cl(b, 10)));
+    info.innerHTML = ''; info.append(sp, pr);
+    const iv = [];
+    const val = (L, step) => { const p = L.data.find(q => t >= q.t && t < q.t + step); return p ? L.name + ' ' + p.v.toFixed(2) : null; };
+    [...(d.overlays || []), ...(d.panes || [])].forEach(L => { const s = val(L, tfs); if (s) iv.push(s); });
+    [...(d.pov || []), ...(d.ppan || [])].forEach(L => { const s = val(L, tfs); if (s) iv.push(s + ' (প্রি)'); });
+    if (iv.length) info.append(h('div', {style: 'color:#8b96a8'}, iv.join(' · ')));
+  }
+  // টাচ/মাউস
+  const P = new Map(); let pinch = null, tapAt = 0, moved = 0, startXY = null;
+  const local = e => { for (const cv of panes) { const r = cv.getBoundingClientRect(); if (e.clientY >= r.top && e.clientY <= r.bottom) return {cv, x: e.clientX - r.left, y: e.clientY - r.top}; } const r = panes[0].getBoundingClientRect(); return {cv: panes[0], x: e.clientX - r.left, y: 0}; };
+  function cross(e) {
+    const L = local(e), t = tAt(L.x), snapped = t0 + Math.floor((t - t0) / base) * base + base / 2;
+    if (t < t0 || t > t1) return;
+    R.cx = snapped; R.cy = L.y; R.cid = L.cv._id; showInfo(snapped); redraw();
+  }
+  box.addEventListener('pointerdown', e => {
+    if (!panes.length) return;
+    P.set(e.pointerId, {x: e.clientX, y: e.clientY}); moved = 0; startXY = {x: e.clientX, y: e.clientY};
+    try { box.setPointerCapture(e.pointerId); } catch (_) {}
+    if (P.size === 2) { const [p, q] = [...P.values()]; const r = box.getBoundingClientRect(); pinch = {d: Math.hypot(p.x - q.x, p.y - q.y) || 1, a: R.a, b: R.b, m: (p.x + q.x) / 2 - r.left}; R.cx = null; }
+    else if (e.pointerType !== 'mouse' || e.button === 0) cross(e);
+  });
+  box.addEventListener('pointermove', e => {
+    if (!panes.length) return;
+    const prev = P.get(e.pointerId);
+    if (prev) { moved += Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y); P.set(e.pointerId, {x: e.clientX, y: e.clientY}); }
+    if (P.size >= 2 && pinch) {
+      const [p, q] = [...P.values()], r = box.getBoundingClientRect(), dist = Math.hypot(p.x - q.x, p.y - q.y) || 1, mid = (p.x + q.x) / 2 - r.left;
+      const span = (pinch.b - pinch.a) * pinch.d / dist, tc = pinch.a + (pinch.m - 2) / plotW() * (pinch.b - pinch.a);
+      const f = (mid - 2) / plotW(); setRange(tc - f * span, tc - f * span + span); return;
+    }
+    if (e.pointerType === 'mouse') {
+      if (e.buttons & 1 && prev) { const dx = e.clientX - prev.x; const s = -dx / plotW() * (R.b - R.a); setRange(R.a + s, R.b + s); }
+      else cross(e);
+    } else if (prev) cross(e);
+  });
+  const up = e => {
+    const had = P.delete(e.pointerId); if (P.size < 2) pinch = null;
+    if (!had || P.size) return;
+    if (moved < 8) {
+      const L = local(e), o = L.cv._o;
+      if (L.y < 22 && o._leg) { const hit = o._leg.find(z => L.x >= z.a && L.x <= z.b); if (hit) { const key = (o.id.startsWith('p') && o.id !== 'prem' ? 'p:' : (o.id === 'prem' ? 'p:' : 's:')) + hit.n; CHS.hide[key] = !CHS.hide[key]; build(); return; } }
+      const now = Date.now(); if (now - tapAt < 320) { fitDay(); tapAt = 0; } else tapAt = now;
+    }
+  };
+  box.addEventListener('pointerup', up); box.addEventListener('pointercancel', e => { P.delete(e.pointerId); pinch = null; });
+  box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') { R.cx = null; redraw(); } });
+  box.addEventListener('wheel', e => { e.preventDefault(); const L = local(e), t = tAt(L.x), k = e.deltaY > 0 ? 1.18 : 0.85, f = (L.x - 2) / plotW(); const span = (R.b - R.a) * k; setRange(t - f * span, t - f * span + span); }, {passive: false});
+  ov._rs && window.removeEventListener('resize', ov._rs); ov._rs = () => resize(); window.addEventListener('resize', ov._rs);
+  drawCtl(); build();
+  ov.append(h('div', {class: 'note', style: 'margin:0 10px 24px'}, 'IN = এন্ট্রি (নীল), OUT = এক্সিট (সবুজ/লাল)। প্রিমিয়ামে নীল রেখা = এন্ট্রি, লাল = প্রথম SL, সবুজ = টার্গেট; হালকা লাল/সবুজ জোন = ঝুঁকি/লাভের এলাকা। ইন্ডিকেটর শুধু এই Case-এর শর্তে ব্যবহার হওয়াগুলো দেখায়।'));
+}
+function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
+function drawLine(id, arr, color, fill) {
+  const cv = $('#' + id); if (!cv || !arr || !arr.length) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W) return;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const e = [0].concat(arr), mn = Math.min(...e, 0), mx = Math.max(...e, 0), padL = 8, padR = 8, padT = 16, padB = 14;
+  const X = i => padL + (W - padL - padR) * i / Math.max(e.length - 1, 1), Y = v => H - padB - (H - padT - padB) * (v - mn) / Math.max(mx - mn, 1);
+  g.font = '10px sans-serif'; g.textBaseline = 'middle';
+  for (let k = 0; k <= 3; k++) {
+    const v = mn + (mx - mn) * k / 3, y = Y(v);
+    g.strokeStyle = '#16251d'; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke();
+    g.fillStyle = '#5d7268'; g.textAlign = 'left'; g.fillText(Math.round(v).toLocaleString('en-IN'), padL + 2, y - 7);
+  }
+  g.strokeStyle = '#2f4a3b'; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(padL, Y(0)); g.lineTo(W - padR, Y(0)); g.stroke(); g.setLineDash([]);
+  const up = e[e.length - 1] >= 0, lc = id === 'eq' ? (up ? '#2ee27d' : '#ff5a67') : color;
+  const grd = g.createLinearGradient(0, padT, 0, H - padB); grd.addColorStop(0, rgba(lc, id === 'eq' ? .30 : .26)); grd.addColorStop(1, rgba(lc, 0));
+  g.beginPath(); e.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v)));
+  g.lineTo(X(e.length - 1), Y(0)); g.lineTo(X(0), Y(0)); g.closePath(); g.fillStyle = grd; g.fill();
+  g.strokeStyle = lc; g.lineWidth = 2; g.lineJoin = 'round'; g.shadowColor = lc; g.shadowBlur = 8; g.beginPath();
+  e.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); g.shadowBlur = 0;
+  const lx = X(e.length - 1), ly = Y(e[e.length - 1]), lab = Math.round(e[e.length - 1]).toLocaleString('en-IN'), w = g.measureText(lab).width + 12;
+  g.fillStyle = lc; g.beginPath(); g.arc(lx, ly, 3.5, 0, 7); g.fill();
+  g.fillStyle = lc; g.beginPath(); (g.roundRect ? g.roundRect(Math.min(lx - w, W - padR - w), Math.max(ly - 22, 2), w, 16, 5) : g.rect(Math.min(lx - w, W - padR - w), Math.max(ly - 22, 2), w, 16)); g.fill();
+  g.fillStyle = '#04140a'; g.textAlign = 'center'; g.font = 'bold 10px sans-serif'; g.fillText(lab, Math.min(lx - w, W - padR - w) + w / 2, Math.max(ly - 22, 2) + 8.5);
+}
+function drawEq() {
+  if (!LAST) return;
+  drawLine('eq', LAST.equity, '#2ee27d');
+  drawLine('ddc', (LAST.an || {}).dd, '#ff6161', 'rgba(255,97,97,.18)');
+}
+function dlCsv() {
+  const T = LAST.trades, cols = Object.keys(T[0]);
+  const csv = [cols.join(',')].concat(T.map(t => cols.map(c => '"' + csvVal(c, t[c]).replace(/"/g, '""') + '"').join(','))).join('\n');
+  const a = h('a', {href: URL.createObjectURL(new Blob([csv], {type: 'text/csv'})), download: 'trades.csv'}); document.body.append(a); a.click(); a.remove();
+}
+
+/* ---------- টিউনিং ---------- */
+function rangeVals(from, to, step) {
+  const out = []; if (!(step > 0)) return [from];
+  for (let v = from, n = 0; v <= to + 1e-9 && n < 80; v += step, n++) out.push(Math.round(v * 1e6) / 1e6);
+  return out;
+}
+function renderTune() {
+  const root = $('#t-tune'); root.innerHTML = '';
+  if (!SW.length) return;
+  const opts = SW.map((s, i) => [i, s.label]);
+  const pick = (key, none) => {
+    const T = TUNE[key], s = h('select');
+    if (none) s.append(h('option', {value: -1}, '— নেই —'));
+    opts.forEach(([v, t]) => s.append(h('option', {value: v}, t)));
+    s.value = T.i; if (T.i >= SW.length) { T.i = none ? -1 : 0; s.value = T.i; }
+    s.addEventListener('change', () => { T.i = parseInt(s.value); const cur = T.i >= 0 ? getp(SW[T.i].path) : 0; if (T.i >= 0) { T.from = cur; T.to = cur * 2 || 10; T.step = Math.max(cur / 2, 1) || 1; } renderTune(); });
+    const num = (k, l) => { const i = h('input', {type: 'number', step: 'any', value: T[k]}); i.addEventListener('change', () => T[k] = parseFloat(i.value) || 0); return F(l, i); };
+    return h('div', {class: 'body'}, F(none ? 'দ্বিতীয় প্যারামিটার' : 'প্যারামিটার', s), T.i >= 0 ? [num('from', 'শুরু'), num('to', 'শেষ'), num('step', 'ধাপ')] : null,
+      T.i >= 0 ? h('div', {class: 'note', style: 'flex:1 1 100%'}, 'এখনকার মান: ' + getp(SW[T.i].path) + ' | মান: ' + rangeVals(T.from, T.to, T.step).join(', ')) : null);
+  };
+  root.append(h('div', {class: 'note'}, 'এখন সেটিংস ট্যাবে যা আছে সেটাই বেস। এক বা দুটি সংখ্যা বেছে রেঞ্জ দিন, সব কম্বিনেশন ব্যাকটেস্ট হবে (সর্বোচ্চ ১৫০)। ফলাফল পুরো ডেটার ওপর, ✓ চিহ্নিত আর আশপাশের মানও ভালো এমন সেটিং বাছুন।'));
+  root.append(h('div', {class: 'card'}, pick('a', false)));
+  root.append(h('div', {class: 'card'}, pick('b', true)));
+  const mt = h('input', {type: 'number', value: TUNE.min}); mt.addEventListener('change', () => TUNE.min = parseInt(mt.value) || 0);
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ন্যূনতম ট্রেড (সব)', mt),
+    h('button', {class: 'btn g', style: 'align-self:flex-end', on: {click: doSweep}}, '🎛 টিউনিং চালান'))));
+  root.append(h('div', {id: 'sweepRes'}));
+}
+async function doSweep() {
+  const params = [];
+  for (const k of ['a', 'b']) {
+    const T = TUNE[k]; if (T.i < 0) continue;
+    const vals = rangeVals(T.from, T.to, T.step);
+    params.push({path: SW[T.i].path, label: SW[T.i].label, values: vals});
+  }
+  if (!params.length) return;
+  const res = await runJob({kind: 'sweep', settings: S, params}, 'টিউনিং');
+  if (res) { LASTSWEEP = res; renderSweep(); }
+}
+let LASTSWEEP = null;
+function renderSweep() {
+  const box = $('#sweepRes'); if (!box || !LASTSWEEP) return;
+  const R = LASTSWEEP, sorters = {net: r => r.all.net, pf: r => r.all.pf, dd: r => r.all.dd, exp: r => r.all.exp, pm: r => r.all.pm, rec: r => r.all.rec, rr: r => r.all.rr};
+  if (!(TUNE.sort in sorters)) TUNE.sort = 'net';
+  let rows = R.rows.filter(r => r.all.n >= TUNE.min);
+  rows = rows.slice().sort((a, b) => sorters[TUNE.sort](b) - sorters[TUNE.sort](a));
+  const sel = h('select', {on: {change: e => { TUNE.sort = e.target.value; renderSweep(); }}});
+  [['net', 'সবচেয়ে বেশি নেট'], ['pf', 'সবচেয়ে ভালো PF'], ['rec', 'Recovery (নেট ÷ DD)'], ['dd', 'সবচেয়ে কম Drawdown'], ['pm', 'বেশি লাভজনক মাস %'], ['exp', 'গড় ট্রেড'], ['rr', 'RR']].forEach(([v, t]) => sel.append(h('option', {value: v}, t)));
+  sel.value = TUNE.sort;
+  box.innerHTML = '';
+  box.append(h('h3', {}, 'ফল (' + rows.length + '/' + R.rows.length + ')'), F('সাজান', sel));
+  if (!rows.length) { box.append(h('div', {class: 'note'}, 'ন্যূনতম ট্রেড শর্তে কিছু মেলেনি।')); return; }
+  const head = R.labels.map(l => '<th>' + l.replace(/\[.*?\]/, '') + '</th>').join('');
+  const body = rows.slice(0, 80).map(r => {
+    const ok = r.all.net > 0 && r.all.pf >= 1.2 && r.all.pm >= 50;
+    const id = R.rows.indexOf(r);
+    return '<tr>' + r.vals.map(v => '<td>' + v + '</td>').join('') + '<td>' + r.all.n + '</td><td class="' + cls(r.all.net) + '">' + Math.round(r.all.net) + '</td><td>' + r.all.pf.toFixed(2) + '</td><td>' + r.all.win.toFixed(0) + '%</td><td>' + Math.round(r.all.dd) + '</td><td>' + r.all.rr.toFixed(2) + '</td><td>' + r.all.pm.toFixed(0) + '%</td><td>' + (ok ? '✓' : '') + '</td><td><button class="btn s" data-a="' + id + '">লাগান</button></td></tr>';
+  }).join('');
+  const t = h('div', {class: 'scroll', html: '<table><tr>' + head + '<th>ট্রেড</th><th>নেট ₹</th><th>PF</th><th>Win%</th><th>DD ₹</th><th>RR</th><th>মাস+</th><th>✓</th><th></th></tr>' + body + '</table>'});
+  t.addEventListener('click', e => {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const r = R.rows[parseInt(b.dataset.a)];
+    R.paths.forEach((p, i) => setp(p, r.vals[i]));
+    renderBuild(); showTab('build'); $('#status').textContent = 'সেটিং লাগানো হয়েছে, ▶ Run চাপুন';
+  });
+  box.append(t, h('div', {class: 'note'}, '✓ = নেট লাভ, PF ≥ ১.২ এবং অন্তত অর্ধেক মাস লাভে। সবচেয়ে ভালো একটা সংখ্যার দিকে না তাকিয়ে এমন মান বাছুন যার আশেপাশের মানগুলোও ভালো, তাতে ভাগ্যের ওপর নির্ভরতা কমে।'));
+}
+
+/* ---------- প্রিসেট ---------- */
+function renderPresets() {
+  const root = $('#t-pre'); root.innerHTML = '';
+  const nm = h('input', {type: 'text', placeholder: 'স্ট্র্যাটেজির নাম'}), nt = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, F('বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt),
+    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value)}}, '💾 সেভ'),
+    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সেভ ফাইল: presets.json (algo_builder.py-র ফোল্ডারে)। ব্যাকআপের জন্য এই ফাইলটা কপি করে রাখুন।'))));
+  const list = (title, obj, user) => {
+    const box = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, title));
+    const b = h('div', {class: 'body'});
+    const ks = Object.keys(obj);
+    if (!ks.length) b.append(h('div', {class: 'note'}, 'কিছু নেই'));
+    ks.forEach(k => { const mt = (obj[k] || {})._meta; b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap'}, h('span', {style: 'flex:1 1 60%'}, k),
+      h('button', {class: 'btn s', on: {click: () => { S = fixSettings(obj[k]); persist(); renderBuild(); showTab('build'); }}}, 'লোড'),
+      user ? h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + k + '" মুছবেন?')) return; const r = await api('/api/preset/delete', {name: k}); META.presets.user = r.user; renderPresets(); }}}, '🗑') : null,
+      mt ? h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (mt.stats ? 'ট্রেড ' + mt.stats.n + ' | নেট ₹' + mt.stats.net + ' | PF ' + mt.stats.pf + ' | Win ' + mt.stats.win + '% | DD ₹' + mt.stats.dd + ' | ' + mt.stats.from + ' → ' + mt.stats.to : 'সেভের সময় ব্যাকটেস্ট ছিল না') + ' | ' + mt.saved + (mt.note ? ' | ' + mt.note : '')) : null)); });
+    box.append(b); root.append(box);
+  };
+  list('আমার প্রিসেট', META.presets.user, true);
+  list('নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)', META.presets.builtin, false);
+  const ta = h('textarea', {rows: 6, placeholder: 'এখানে JSON পেস্ট করে Import করুন', style: 'font-family:monospace;font-size:11px'});
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, ta,
+    h('button', {class: 'btn s', on: {click: () => { ta.value = JSON.stringify(S, null, 1); }}}, 'Export (বর্তমান সেটিং)'),
+    h('button', {class: 'btn s', on: {click: () => { try { S = fixSettings(JSON.parse(ta.value)); persist(); renderBuild(); showTab('build'); } catch (e) { alert('JSON ঠিক নেই: ' + e.message); } }}}, 'Import'),
+    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
+}
+
+
+function renderData() {
+  const root = $('#t-data'); root.innerHTML = '';
+  if (!META) return;
+  const i = META.info;
+  if (META.datasets) {
+    const ds = META.datasets;
+    const sel = h('select', {}, ...ds.map(d => h('option', {value: d.inst, selected: d.inst === i.inst}, d.name + ' — স্পট ' + d.spot_from + ' → ' + d.spot_to + (d.contracts ? ' | অপশন ' + d.done + '/' + d.contracts + ' কন্ট্র্যাক্ট' : ' | অপশন নেই'))));
+    const f0 = h('input', {type: 'date', value: i.from || ''}), f1 = h('input', {type: 'date', value: i.to || ''});
+    const msg = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'ইনডেক্স ও সময় বেছে "লোড করুন" চাপুন। তারিখ ফাঁকা রাখলে শেষ ~৬ মাস। সময় যত বেশি, মেমোরি ও লোড তত বেশি।');
+    const btn = h('button', {class: 'btn s'}, '⬇ লোড করুন');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; msg.textContent = 'লোড হচ্ছে… (১-২ মিনিট লাগতে পারে, অপেক্ষা করুন)';
+      try {
+        const r = await api('/api/load', {inst: sel.value, from: f0.value, to: f1.value});
+        if (r.error) throw new Error(r.error);
+        META = await api('/api/meta');
+        const ni = META.info; setBase(ni.base || 5);
+        $('#dinfo').innerHTML = [(ni.name || ''), ni.spot_from + ' → ' + ni.spot_to, ni.spot_days + ' দিন', ni.expiries.length + ' এক্সপায়ারি', ni.contracts + ' কন্ট্র্যাক্ট', (ni.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+        if (S.general.tf % (ni.base || 5)) S.general.tf = (5 % (ni.base || 5) === 0) ? 5 : (ni.base || 5);
+        S.general.from = ''; S.general.to = '';
+        persist(); renderBuild(); renderData();
+        if (r.info && r.info.warn) alert(r.info.warn);
+      } catch (e) { msg.textContent = 'ত্রুটি: ' + e.message; btn.disabled = false; }
+    });
+    root.append(h('div', {class: 'h2'}, 'ডেটাসেট বেছে নিন'));
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ইনডেক্স', sel), F('শুরু (ঐচ্ছিক)', f0), F('শেষ (ঐচ্ছিক)', f1), btn, msg)));
+  }
+  root.append(h('div', {class: 'h2'}, 'লোড করা ডেটা'));
+  root.append(h('div', {class: 'kpis'},
+    [['স্পট রেঞ্জ', i.spot_from + ' → ' + i.spot_to], ['ট্রেডিং দিন', i.spot_days], ['এক্সপায়ারি', i.expiries.length], ['কন্ট্র্যাক্ট', i.contracts]]
+      .map(([k, v]) => h('div', {class: 'kpi'}, h('small', {}, k), h('b', {}, String(v))))));
+  const rows = i.expiries.map(e => '<tr><td>' + e.expiry + '</td><td>' + (e.lot || '–') + '</td><td>' + e.from + ' → ' + e.to + '</td><td>' + e.ce + '/' + e.pe + '</td></tr>').join('');
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {class: 'scroll', style: 'flex:1 1 100%', html: '<table><thead><tr><th>এক্সপায়ারি</th><th>লট</th><th>রেঞ্জ</th><th>CE/PE স্ট্রাইক</th></tr></thead><tbody>' + rows + '</tbody></table>'}))));
+  root.append(h('div', {class: 'h2'}, 'পরিকল্পিত (এখনো তৈরি হয়নি)'));
+  [['অটো ডেটা ডাউনলোডার', 'স্পট, ফিউচার, প্রিমিয়াম ও স্টকের ডেটা এক জায়গা থেকে আপডেট'],
+   ['স্টক স্ক্যানার', 'Nifty 50 থেকে স্টক বেছে স্ট্র্যাটেজি লাগানো; যেদিন যে স্টকে সেটআপ আগে রেডি হয়, সেখানে এন্ট্রি'],
+   ['লাইভ / পেপার সিগন্যাল', 'রোজকার সিগন্যাল ও পেপার ট্রেড ট্র্যাক']]
+    .forEach(([t, d]) => root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%'}, h('b', {}, t), h('span', {class: 'pill soon'}, 'শীঘ্রই')), h('div', {class: 'note', style: 'flex:1 1 100%'}, d)))));
+}
+
+/* ---------- ট্যাব ---------- */
+function showTab(t) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  for (const k of ['build', 'res', 'tune', 'pre', 'data']) $('#t-' + k).hidden = k !== t;
+  if (t === 'res') drawEq();
+  if (t === 'data') renderData();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+$('#run').addEventListener('click', async () => {
+  const res = await runJob({kind: 'run', settings: S}, 'ব্যাকটেস্ট');
+  if (res) { LASTRUN = JSON.stringify(S); renderResults(res); showTab('res'); }
+});
+window.addEventListener('resize', () => { if (!$('#t-res').hidden) drawEq(); });
+
+(async function init() {
+  try {
+    META = await api('/api/meta');
+    const i = META.info; setBase(i.base || 5);
+    $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+    let saved = null; try { saved = JSON.parse(localStorage.getItem('ab_S2')); } catch (e) {}
+    S = fixSettings(saved || META.defaults);
+    if (S.general.tf % (i.base || 5)) S.general.tf = i.base || 5;
+    renderBuild(); renderPresets();
+  } catch (e) {
+    $('#dinfo').innerHTML = '<span class="pl" style="color:#ff8a8a">ত্রুটি: ' + e.message + '</span>';
+  }
+})();
+</script>
+</body>
+</html>
+'''
+
+if __name__ == "__main__":
+    main()

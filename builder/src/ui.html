@@ -1,0 +1,1003 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0a1710">
+<title>Green Bull Algo Builder</title>
+<style>
+:root{--bg:#050908;--card:#0c1511;--card2:#111d17;--line:#1b2c23;--line2:#27412f;--tx:#eaf3ee;--mut:#7f948a;--ac:#22d36b;--ac2:#13a352;--g:#2ee27d;--r:#ff5a67;--y:#f5c542;--b:#4f9cff}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;color:var(--tx);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Bengali",sans-serif;font-variant-numeric:tabular-nums}
+body{background:radial-gradient(900px 420px at 50% -140px,#12351f 0%,transparent 62%),radial-gradient(600px 300px at 100% 40%,#0c2a1a55 0%,transparent 70%),var(--bg);background-attachment:fixed;min-height:100vh}
+header.top{position:sticky;top:0;z-index:5;padding:11px 14px 10px;background:linear-gradient(180deg,#0b1a12f2,#08120dd9);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid #1d4430;display:flex;flex-direction:column;gap:7px}
+header.top:after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,#22d36b99,transparent)}
+.brand{display:flex;align-items:center;gap:11px}
+.logo{width:42px;height:42px;border-radius:13px;background:conic-gradient(from 210deg,#22d36b,#0f7a3a,#22d36b);display:flex;align-items:center;justify-content:center;box-shadow:0 0 0 1px #5df5a255,0 6px 22px #22d36b44}
+.logo svg{filter:drop-shadow(0 1px 2px #0006)}
+h1{margin:0;font-size:18px;letter-spacing:.3px;font-weight:800;line-height:1.15}
+h1 span{background:linear-gradient(90deg,#4ef08d,#22d36b);-webkit-background-clip:text;background-clip:text;color:transparent;font-weight:800}
+.tag{font-size:10px;color:#6fae8e;letter-spacing:1.4px;text-transform:uppercase;margin-top:2px}
+#dinfo{display:flex;flex-wrap:wrap;gap:5px;font-size:11px;color:var(--mut)}
+#dinfo .pl{background:#0b1a12;border:1px solid #1d3a2a;border-radius:20px;padding:2px 10px;color:#a9d3bd}
+#dinfo .pl:first-child:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ac);margin-right:6px;box-shadow:0 0 8px var(--ac);vertical-align:1px}
+nav{display:flex;position:fixed;left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom));height:58px;background:#09130ff0;backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:1px solid #1f4030;border-radius:20px;z-index:8;padding:5px;box-shadow:0 12px 34px -8px #000c,0 0 0 1px #ffffff06 inset}
+nav button{flex:1;padding:4px 2px;border:0;background:transparent;color:#6f857b;font-size:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:14px;letter-spacing:.5px;font-weight:600;transition:all .18s}
+nav button svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+nav button.on{color:#06210f;background:linear-gradient(180deg,#34e57c,#1fbf5e);box-shadow:0 4px 14px #22d36b55}
+main{padding:12px 11px 200px;max-width:760px;margin:0 auto}
+.h2{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:1.2px;text-transform:uppercase;color:#6fae8e;margin:16px 2px 8px}
+.h2:after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line2),transparent)}
+.pill{display:inline-block;font-size:10px;border:1px solid #2a5a40;color:#7fe0a8;border-radius:20px;padding:1px 8px;margin-left:6px}
+.pill.soon{border-color:#5a4a1a;color:#f5c542}
+.tilegrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+section[hidden]{display:none}
+.card{background:linear-gradient(180deg,#0e1914,#0b130f);border:1px solid var(--line);border-radius:16px;margin:0 0 11px;padding:0;box-shadow:0 1px 0 #ffffff08 inset,0 14px 28px -18px #000}
+.card>summary{padding:13px 14px;font-weight:700;cursor:pointer;list-style:none;letter-spacing:.2px}
+.card>summary::-webkit-details-marker{display:none}
+.card>summary:after{content:"";float:right;width:8px;height:8px;margin-top:6px;border-right:2px solid var(--mut);border-bottom:2px solid var(--mut);transform:rotate(45deg);transition:transform .2s}
+.card[open]>summary:after{transform:rotate(-135deg);margin-top:9px}
+.card[open]>summary{border-bottom:1px solid var(--line)}
+.body{padding:12px 14px 14px;display:flex;flex-wrap:wrap;gap:10px}
+.f{display:flex;flex-direction:column;gap:3px;min-width:92px;flex:1 1 92px}
+.f>span{font-size:11px;color:var(--mut);letter-spacing:.2px}
+.f.chk{flex-direction:row;align-items:center;gap:8px;flex:1 1 100%}
+select,input[type=text],input[type=number],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
+select:focus,input:focus,textarea:focus{outline:0;border-color:var(--ac);box-shadow:0 0 0 3px #22d36b22}
+input[type=checkbox]{width:19px;height:19px;accent-color:var(--ac)}
+.ind{width:100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
+.ind>b{flex:1 1 100%;font-size:13px}
+.case{border-color:#1f5a3f;border-left:3px solid var(--ac)}
+.case>summary{color:#8df0b3}
+.sub{flex:1 1 100%;font-size:12px;color:var(--mut);margin:8px 0 0;padding-top:10px;border-top:1px dashed var(--line);display:flex;justify-content:space-between;align-items:center}
+.cond{flex:1 1 100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:9px;display:flex;flex-direction:column;gap:7px}
+.r1{display:flex;gap:6px;align-items:flex-end}
+.r1>select,.r1>.mini{flex:1 1 0;min-width:0}
+.r1 .mini{min-width:60px}
+.r1 input[type=checkbox]{flex:0 0 22px;margin:0 2px 9px 2px}
+.r1 .btn{flex:0 0 auto;margin-bottom:1px}
+.cond.off{opacity:.45}
+select.jn{flex:0 0 70px!important}
+.btn{background:#101d16;color:var(--tx);border:1px solid var(--line2);border-radius:11px;padding:9px 13px;font-size:13px;font-weight:600;transition:transform .08s,filter .15s}
+.btn:active{transform:scale(.97)}
+.btn.p{background:linear-gradient(180deg,#34e57c,#1aa855);border-color:#4cf08e;color:#04180b;font-weight:800;box-shadow:0 6px 18px -4px #22d36b88}
+.btn.g{background:#1f6f43;border-color:#2a8a57;color:#fff}
+.btn.d{color:var(--r);border-color:#4a2228}
+.btn.s{padding:5px 10px;font-size:12px}
+.bar{position:fixed;left:10px;right:10px;bottom:calc(74px + env(safe-area-inset-bottom));background:#09130ff2;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid #1f4030;border-radius:16px;padding:8px 10px;display:flex;gap:10px;align-items:center;z-index:6;box-shadow:0 10px 30px -10px #000c}
+.bar .btn.p{flex:0 0 auto;padding:11px 22px;font-size:14px;letter-spacing:.4px}
+#status{flex:1;font-size:12px;color:var(--mut);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#prog{height:3px;background:linear-gradient(90deg,#22d36b,#9bf5c0);box-shadow:0 0 10px #22d36b;width:0;position:fixed;bottom:calc(74px + env(safe-area-inset-bottom));left:10px;z-index:7;transition:width .3s;border-radius:3px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:7px 6px;text-align:right;border-bottom:1px solid #15241c;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:#6fae8e;font-weight:600;font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;position:sticky;top:0;background:#0b130f;z-index:1}
+tr:nth-child(even) td{background:#0a110e}
+tr[data-i]:hover td,tr[data-i]:active td{background:#122419}
+.pos{color:var(--g)}.neg{color:var(--r)}
+.scroll{overflow:auto;max-height:420px;border:1px solid var(--line);border-radius:12px;background:#0a110e}
+.kpis{display:grid;grid-template-columns:repeat(2,1fr);gap:9px;margin-bottom:12px}
+.kpi{position:relative;overflow:hidden;background:linear-gradient(160deg,#0f1b15,#0a110e);border:1px solid var(--line);border-radius:14px;padding:11px 12px 11px 15px}
+.kpi:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#2a4a39}
+.kpi.good:before{background:linear-gradient(180deg,#34e57c,#13a352)}.kpi.bad:before{background:linear-gradient(180deg,#ff7a85,#d63a49)}
+.kpi small{color:var(--mut);display:block;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase}
+.kpi b{font-size:19px;font-weight:800;letter-spacing:.2px}
+.kpi.hero{grid-column:1/-1;padding:16px 16px 14px 18px;border-radius:18px}
+.kpi.hero b{font-size:34px;line-height:1.15;display:block;margin:3px 0 6px}
+.kpi.hero.up{background:radial-gradient(500px 160px at 0% 0%,#14402a 0%,transparent 70%),linear-gradient(160deg,#0d2418,#08130d);border-color:#1f6f43}
+.kpi.hero.up:before{background:linear-gradient(180deg,#5df5a2,#13a352);width:4px}
+.kpi.hero.dn{background:radial-gradient(500px 160px at 0% 0%,#4a1a20 0%,transparent 70%),linear-gradient(160deg,#241012,#130a0b);border-color:#6b2a31}
+.kpi.hero.dn:before{background:linear-gradient(180deg,#ff7a85,#d63a49);width:4px}
+.hsub{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mut)}
+.hsub i{font-style:normal;color:var(--tx);font-weight:700}
+canvas{width:100%;height:200px;background:linear-gradient(180deg,#0c1511,#09100c);border:1px solid var(--line);border-radius:14px;display:block}
+.note{color:var(--mut);font-size:12px;margin:7px 2px}
+.warn{background:linear-gradient(180deg,#3a2c12,#2c210d);border:1px solid #6b4a14;color:#ffd58a;border-radius:12px;padding:9px 12px;font-size:12px;margin:0 0 11px}
+.ok{background:#12301f;border:1px solid #1f6f43;color:#9be7bb}
+h3{margin:18px 2px 7px;font-size:14px;font-weight:700;letter-spacing:.2px}
+.chip{display:inline-block;background:#101d16;border:1px solid var(--line);border-radius:99px;padding:2px 10px;font-size:11px;color:var(--mut);margin:2px 3px 0 0}
+.tgbox{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:10px;background:linear-gradient(160deg,#10200f,#0b150e);border:1px solid #2c5a22;border-radius:14px;padding:11px}
+.tgbox>.tgh{flex:1 1 100%;font-weight:700;color:#d6f5a3;display:flex;align-items:center;gap:7px}
+.lotplan{flex:1 1 100%;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px;color:var(--mut)}
+.lp{display:inline-flex;align-items:center;gap:5px;border-radius:9px;padding:3px 9px;font-weight:700;font-size:12px;border:1px solid}
+.lp.t1{background:#2a2410;border-color:#6b5a14;color:#f5c542}.lp.t2{background:#2a1c10;border-color:#6b4214;color:#f59e42}.lp.rn{background:#10281a;border-color:#1f6f43;color:#5df5a2}
+</style>
+</head>
+<body>
+<header class="top"><div class="brand"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l5-6 4 3 7-9"/><path d="M15 5h5v5"/></svg></div><div><h1>Green Bull <span>Algo Builder</span></h1><div class="tag">Quant Strategy Lab · Backtest · Optimize</div></div></div><div id="dinfo"><span class="pl">লোড হচ্ছে…</span></div></header>
+<nav>
+  <button data-tab="build" class="on"><svg viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>Strategy</button>
+  <button data-tab="res"><svg viewBox="0 0 24 24"><path d="M5 20V11M11 20V4M17 20v-6M3 20h18"/></svg>Results</button>
+  <button data-tab="tune"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>Optimize</button>
+  <button data-tab="pre"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg>Library</button>
+  <button data-tab="data"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Data</button>
+</nav>
+<main>
+  <section id="t-build"></section>
+  <section id="t-res" hidden><div class="note">এখনও কোনো রান হয়নি। নিচে ▶ Run চাপুন।</div></section>
+  <section id="t-tune" hidden></section>
+  <section id="t-pre" hidden></section>
+  <section id="t-data" hidden></section>
+</main>
+<div class="bar"><button class="btn p" id="run">▶ Run</button><div id="status">প্রস্তুত</div></div>
+<div id="prog"></div>
+
+<script>
+"use strict";
+let META = null, S = null, SW = [], LAST = null, TUNE = {a: {i: 0, from: 5, to: 30, step: 5}, b: {i: -1, from: 0, to: 0, step: 1}, min: 20, sort: 'net'};
+const $ = (s, r) => (r || document).querySelector(s);
+const MATYPES = [['ema','EMA'],['sma','SMA'],['wma','WMA'],['rma','RMA'],['hma','HMA']];
+let TFS = [[0,'চার্ট TF'],[5,'5m'],[10,'10m'],[15,'15m'],[30,'30m'],[60,'60m']];
+let CTFS = TFS.slice(1);
+function setBase(b) { const L = [1,3,5,6,9,10,12,15,18,21,30,45,60].filter(x => x % b === 0 && x >= b); TFS = [[0,'চার্ট TF']].concat(L.map(x => [x, x + 'm'])); CTFS = TFS.slice(1); }
+const PSRC = [['close','Close'],['open','Open'],['high','High'],['low','Low'],['hl2','HL2'],['hlc3','HLC3'],['ohlc4','OHLC4']];
+const OFFS = [[-3,'ITM 3'],[-2,'ITM 2'],[-1,'ITM 1'],[0,'ATM'],[1,'OTM 1'],[2,'OTM 2'],[3,'OTM 3'],[4,'OTM 4']];
+
+function h(tag, attrs, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') e.className = v;
+    else if (k === 'value') e.value = v;
+    else if (k === 'checked') e.checked = !!v;
+    else if (k === 'on') for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
+    else if (k === 'html') e.innerHTML = v;
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat(9)) { if (kid == null || kid === false) continue; e.append(kid.nodeType ? kid : document.createTextNode(String(kid))); }
+  return e;
+}
+function getp(p) { return p.split('.').reduce((o, k) => o[k], S); }
+function setp(p, v) { const ks = p.split('.'); let o = S; for (let i = 0; i < ks.length - 1; i++) o = o[ks[i]]; o[ks[ks.length - 1]] = v; persist(); }
+function persist() { try { localStorage.setItem('ab_S2', JSON.stringify(S)); } catch (e) {} }
+function merge(def, inc) {
+  if (inc == null) return JSON.parse(JSON.stringify(def));
+  if (Array.isArray(def) || typeof def !== 'object') return inc;
+  const out = JSON.parse(JSON.stringify(def));
+  for (const k of Object.keys(inc)) out[k] = (k in def && def[k] && typeof def[k] === 'object' && !Array.isArray(def[k])) ? merge(def[k], inc[k]) : inc[k];
+  return out;
+}
+function fixSettings(inp) {
+  const d = META.defaults, s = {general: merge(d.general, (inp || {}).general), ind: merge(d.ind, (inp || {}).ind), cases: []};
+  for (const c of ((inp || {}).cases || d.cases)) {
+    const m = merge(META.case, Object.assign({}, c, {entry: undefined, exit: undefined}));
+    m.entry = (c.entry || META.case.entry).map(x => merge(META.slot, x));
+    m.exit = (c.exit || META.case.exit).map(x => merge(META.slot, x));
+    s.cases.push(m);
+  }
+  return s;
+}
+
+/* ---------- ফিল্ড বিল্ডার ---------- */
+function selCtl(path, opts, cb, numeric) {
+  const s = h('select');
+  for (const [v, t] of opts) s.append(h('option', {value: v}, t));
+  s.value = String(getp(path));
+  s.addEventListener('change', () => { setp(path, numeric ? parseFloat(s.value) : s.value); cb && cb(); });
+  return s;
+}
+function numCtl(path, label, step, noreg) {
+  const i = h('input', {type: 'number', step: step || 'any', inputmode: 'decimal', value: getp(path)});
+  i.addEventListener('change', () => { const x = parseFloat(i.value); setp(path, isNaN(x) ? 0 : x); });
+  if (!noreg) SW.push({path, label});
+  return i;
+}
+function txtCtl(path, ph) {
+  const i = h('input', {type: 'text', value: getp(path), placeholder: ph || ''});
+  i.addEventListener('change', () => setp(path, i.value.trim()));
+  return i;
+}
+function chkCtl(path, cb) {
+  const i = h('input', {type: 'checkbox', checked: !!getp(path)});
+  i.addEventListener('change', () => { setp(path, i.checked); cb && cb(); });
+  return i;
+}
+const F = (label, ctl) => h('label', {class: 'f'}, h('span', {}, label), ctl);
+const FC = (label, ctl) => h('label', {class: 'f chk'}, ctl, h('span', {style: 'font-size:13px;color:var(--tx)'}, label));
+
+
+/* ---------- আংশিক প্রফিট বুকিং (T1/T2) ---------- */
+function lotPlan(L, tg) {
+  if (L < 2) return null;
+  let left = L - 1; const parts = [];
+  const spec = [['T1', tg.t1.qty]].concat(tg.t2.on ? [['T2', tg.t2.qty]] : []);
+  spec.forEach(([tag, q]) => { if (left <= 0) return; const n = Math.max(1, Math.min(Math.floor(L * q / 100 + 0.4999), left)); parts.push([tag, n]); left -= n; });
+  return {parts, runner: L - parts.reduce((a, x) => a + x[1], 0)};
+}
+function tgBlock(c, p) {
+  const tg = c.tg, L = S.general.lots, box = h('div', {class: 'tgbox'});
+  box.append(h('div', {class: 'tgh'}, '🎯 আংশিক প্রফিট বুকিং (Scale-out)'));
+  box.append(FC('চালু: Target ছুঁলে কিছু লট বেচে SL সরান', chkCtl(p + '.tg.on', () => renderBuild())));
+  if (!tg.on) { box.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'যেমন ২ লটে T1-এ ১ লট বেচে SL এন্ট্রিতে আনলে ঝুঁকিহীন রানার বাকি থাকে। লট কমপক্ষে ২ লাগবে।')); return [box]; }
+  box.append(F('টার্গেটের একক', selCtl(p + '.tg.unit', [['pct', '% প্রিমিয়াম'], ['pts', 'পয়েন্ট ₹'], ['rr', 'RR × SL']], () => renderBuild())));
+  box.append(F('Target 1 মান', numCtl(p + '.tg.t1.val', c.name + ' T1', 1)), F('T1-এ কত % লট বেচবেন', numCtl(p + '.tg.t1.qty', c.name + ' T1 লট%', 5)));
+  box.append(F('T1 ছুঁলে SL কোথায় যাবে?', selCtl(p + '.tg.a1.mode', [['none', 'সরবে না'], ['be', 'এন্ট্রিতে (ব্রেকইভেন)'], ['lock', 'এন্ট্রির ওপরে লাভ লক']], () => renderBuild())));
+  if (tg.a1.mode === 'lock') box.append(F('লক লাভ % (এন্ট্রির)', numCtl(p + '.tg.a1.val', c.name + ' লক%', 1)));
+  box.append(FC('Target 2-ও ব্যবহার করুন', chkCtl(p + '.tg.t2.on', () => renderBuild())));
+  if (tg.t2.on) {
+    box.append(F('Target 2 মান (T1-এর চেয়ে বড়)', numCtl(p + '.tg.t2.val', c.name + ' T2', 1)), F('T2-তে কত % লট বেচবেন', numCtl(p + '.tg.t2.qty', c.name + ' T2 লট%', 5)));
+    box.append(F('T2 ছুঁলে SL কোথায় যাবে?', selCtl(p + '.tg.a2.mode', [['none', 'সরবে না'], ['t1', 'T1-এর দামে'], ['be', 'এন্ট্রিতে']])));
+  }
+  const plan = lotPlan(L, tg), lp = h('div', {class: 'lotplan'});
+  if (!plan) lp.append(h('div', {class: 'warn', style: 'flex:1 1 100%;margin:0'}, 'এখন লট ' + L + ' — ভাগ করা যায় না, তাই বুকিং কাজ করবে না। "লট সংখ্যা" কমপক্ষে ২ দিন।'));
+  else {
+    lp.append('লট ' + L + ' →');
+    plan.parts.forEach(([tag, n]) => lp.append(h('span', {class: 'lp ' + tag.toLowerCase()}, tag + ': ' + n + ' লট')));
+    lp.append(h('span', {class: 'lp rn'}, 'রানার: ' + plan.runner + ' লট'));
+    lp.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:2px 0 0'}, 'রানার বাকি লট শেষ টার্গেট / SL / ট্রেইলিং / সিগন্যাল এক্সিট / টাইম স্টপে বেরোয়। প্রতিটি আংশিক বিক্রিতে ব্রোকারেজ আলাদা ধরা হয়। লট পূর্ণসংখ্যায় ভাগ হয়, তাই % আনুমানিক।'));
+  }
+  box.append(lp);
+  return [box];
+}
+
+/* ---------- বিল্ড ট্যাব ---------- */
+const OPEN = (() => { try { return JSON.parse(sessionStorage.getItem('ab_open') || '{}'); } catch (e) { return {}; } })();
+function dtl(key, def, ...kids) {
+  const e = h('details', {class: key.startsWith('case') ? 'card case' : 'card', open: key in OPEN ? OPEN[key] : def}, ...kids);
+  e.addEventListener('toggle', () => { OPEN[key] = e.open; try { sessionStorage.setItem('ab_open', JSON.stringify(OPEN)); } catch (_) {} });
+  return e;
+}
+function renderBuild() {
+  SW = [];
+  const root = $('#t-build');
+  root.innerHTML = '';
+  const G = (k, l, st) => F(l, numCtl('general.' + k, l, st));
+
+  root.append(dtl('gen', true, h('summary', {}, '① সাধারণ সেটিংস'),
+    h('div', {class: 'body'},
+      F('সিগন্যাল কোন চার্টে?', selCtl('general.chart', [['spot', 'স্পট (BankNifty ইনডেক্স)'], ['prem', 'প্রিমিয়াম (অপশনের নিজের চার্ট)']], () => renderBuild())),
+      F('চার্ট টাইমফ্রেম', selCtl('general.tf', CTFS, null, true)),
+      F('লট সংখ্যা', numCtl('general.lots', 'লট সংখ্যা', 1)),
+      F('মূলধন ₹ (DD% এর জন্য)', numCtl('general.capital', 'মূলধন', 1000, true)),
+      F('ডেটা শুরু (YYYY-MM-DD)', txtCtl('general.from', 'খালি = সব')),
+      F('ডেটা শেষ', txtCtl('general.to', 'খালি = সব')),
+      F('Train/Test ভাগ (ঐচ্ছিক)', selCtl('general.split', [[0,'বন্ধ — পুরো ডেটায় ফাইনাল'],[50,'50 / 50'],[60,'60 / 40'],[70,'70 / 30'],[80,'80 / 20']], null, true)),
+      F('এন্ট্রি শুরু (HH:MM)', txtCtl('general.win_from')),
+      F('এন্ট্রি শেষ', txtCtl('general.win_to')),
+      F('স্কয়ার-অফ', txtCtl('general.sqoff')),
+      G('max_trades', 'দিনে সর্বোচ্চ ট্রেড', 1),
+      G('day_loss', 'দৈনিক লস লিমিট ₹ (0=বন্ধ)', 100),
+      G('day_profit', 'দৈনিক প্রফিট লিমিট ₹ (0=বন্ধ)', 100),
+      G('min_dte', 'এক্সপায়ারি কত দিন দূরে (min DTE)', 1),
+      FC('এক্সপায়ারির দিন ট্রেড নয়', chkCtl('general.skip_expiry_day')),
+      FC('নতুন সিগন্যাল লাগবে (শর্ত false→true হলে তবেই এন্ট্রি)', chkCtl('general.fresh')),
+      FC('একই বারে SL ও টার্গেট দুটোই ছুঁলে SL ধরা (রক্ষণশীল)', chkCtl('general.sl_first')))));
+
+  root.append(dtl('cost', false, h('summary', {}, '② খরচ (বাস্তব করুন)'),
+    h('div', {class: 'body'},
+      G('brokerage', 'ব্রোকারেজ ₹/অর্ডার', 1),
+      G('slip', 'স্লিপেজ (প্রিমিয়াম পয়েন্ট/সাইড)', 0.1),
+      G('charges_pct', 'চার্জ % (বিক্রয় টার্নওভারে, আনুমানিক)', 0.01),
+      h('div', {class: 'note', style: 'flex:1 1 100%'}, 'চার্জ % = STT + এক্সচেঞ্জ + GST ইত্যাদির আনুমানিক যোগফল। নিজের ব্রোকারের চার্জ দেখে ঠিক করুন।'))));
+
+  const I = (k, l, parts) => h('div', {class: 'ind'}, h('b', {}, l), ...parts);
+  const ip = (k, f, l, st) => F(l, numCtl('ind.' + k + '.' + f, l + ' [' + k.toUpperCase() + ']', st));
+  const itf = k => F('TF', selCtl('ind.' + k + '.tf', TFS, null, true));
+  const ind = h('div', {class: 'body'});
+  for (const k of ['ma1', 'ma2', 'ma3'])
+    ind.append(I(k, 'Moving Average ' + k.slice(2), [F('টাইপ', selCtl('ind.' + k + '.type', MATYPES)), ip(k, 'len', 'Length', 1), itf(k), F('Source', selCtl('ind.' + k + '.src', PSRC))]));
+  ind.append(I('rsi', 'RSI', [ip('rsi', 'len', 'Length', 1), itf('rsi'), F('Source', selCtl('ind.rsi.src', PSRC))]));
+  ind.append(I('adx', 'ADX / DI', [ip('adx', 'len', 'DI Length', 1), ip('adx', 'smooth', 'Smoothing', 1), itf('adx')]));
+  ind.append(I('atr', 'ATR', [ip('atr', 'len', 'Length', 1), itf('atr')]));
+  for (const k of ['st1', 'st2'])
+    ind.append(I(k, 'Supertrend ' + k.slice(2), [ip(k, 'len', 'Length', 1), ip(k, 'mult', 'Multiplier', 0.5), itf(k)]));
+  ind.append(I('macd', 'MACD', [ip('macd', 'fast', 'Fast', 1), ip('macd', 'slow', 'Slow', 1), ip('macd', 'sig', 'Signal', 1), itf('macd')]));
+  ind.append(I('bb', 'Bollinger Band', [ip('bb', 'len', 'Length', 1), ip('bb', 'mult', 'Multiplier', 0.1), itf('bb'), F('Source', selCtl('ind.bb.src', PSRC))]));
+  ind.append(I('misc', 'অন্যান্য', [ip('orb', 'mins', 'ORB সময় (মিনিট)', 5), ip('vol', 'len', 'Volume SMA Length', 1), ip('don', 'n', 'Highest/Lowest N', 1)]));
+  ind.append(h('div', {class: 'note', style: 'flex:1 1 100%'}, 'উচ্চ TF (যেমন 60m EMA) শুধু সম্পূর্ণ হওয়া বার ধরে, তাই লাইভের চেয়ে একটু পিছিয়ে থাকে (রিপেইন্ট নেই)। ইনডেক্সে ভলিউম না থাকলে VWAP = টাইপিক্যাল প্রাইসের গড়।'));
+  root.append(dtl('ind', false, h('summary', {}, '③ ইন্ডিকেটর প্যারামিটার'), ind));
+
+  S.cases.forEach((c, ci) => root.append(caseCard(ci)));
+  root.append(h('button', {class: 'btn', style: 'width:100%', on: {click: () => {
+    S.cases.push(merge(META.case, {name: 'Case ' + (S.cases.length + 1)})); persist(); renderBuild(); }}}, '＋ নতুন Case যোগ করুন'));
+  renderTune();
+}
+
+function srcSel(path, noNumber) {
+  const s = h('select');
+  let grp = null, gname = '';
+  for (const [id, lb, g] of META.sources) {
+    if (noNumber && id === 'number') continue;
+    if (g !== gname) { grp = h('optgroup', {label: g}); s.append(grp); gname = g; }
+    grp.append(h('option', {value: id}, lb));
+  }
+  s.value = getp(path);
+  return s;
+}
+
+function condRow(cpath, list, i, cname, part) {
+  const p = cpath + '.' + i, sl = list[i];
+  const tag = cname + ' ' + part + '#' + (i + 1);
+  const row = h('div', {class: 'cond' + (sl.on ? '' : ' off')});
+  const on = chkCtl(p + '.on', () => renderBuild());
+  const join = selCtl(p + '.join', [['AND', 'AND'], ['OR', 'OR']]); join.className = 'jn';
+  if (i === 0) join.style.visibility = 'hidden';
+  const L = srcSel(p + '.l', true); L.addEventListener('change', () => setp(p + '.l', L.value));
+  const op = selCtl(p + '.op', META.ops, () => renderBuild());
+  const noR = (sl.op === 'rising' || sl.op === 'falling');
+  const isNum = sl.r === 'number';
+  const R = srcSel(p + '.r', false); R.addEventListener('change', () => { setp(p + '.r', R.value); renderBuild(); });
+  const mini = (label, ctl) => h('label', {class: 'f mini'}, h('span', {}, label), ctl);
+  const ls = numCtl(p + '.ls', tag + ' বাম shift', 1); ls.min = 0;
+  const r3 = h('div', {class: 'r1'}, mini('বাম shift (বার আগে)', ls));
+  if (!noR) {
+    if (!isNum) { const rs = numCtl(p + '.rs', tag + ' ডান shift', 1); rs.min = 0; r3.append(mini('ডান shift', rs)); }
+    r3.append(mini(isNum ? 'সংখ্যা' : 'গুণক ×', isNum ? numCtl(p + '.num', tag + ' সংখ্যা', 'any') : numCtl(p + '.mul', tag + ' গুণক', 0.05)));
+  }
+  r3.append(h('button', {class: 'btn d s', on: {click: () => { list.splice(i, 1); persist(); renderBuild(); }}}, '✕'));
+  row.append(h('div', {class: 'r1'}, on, join, L), h('div', {class: 'r1'}, op, noR ? null : R), r3);
+  return row;
+}
+
+function condBlock(ci, part, title, hint) {
+  const c = S.cases[ci], list = c[part], cpath = 'cases.' + ci + '.' + part;
+  const wrap = h('div', {style: 'flex:1 1 100%;display:flex;flex-direction:column;gap:6px'});
+  wrap.append(h('div', {class: 'sub'}, h('b', {style: 'color:var(--tx)'}, title), h('span', {}, hint)));
+  list.forEach((_, i) => wrap.append(condRow(cpath, list, i, c.name, part === 'entry' ? 'Entry' : 'Exit')));
+  wrap.append(h('button', {class: 'btn s', style: 'align-self:flex-start', on: {click: () => {
+    list.push(merge(META.slot, {join: part === 'exit' ? 'OR' : 'AND'})); persist(); renderBuild(); }}}, '＋ শর্ত যোগ'));
+  return wrap;
+}
+
+function caseCard(ci) {
+  const c = S.cases[ci], p = 'cases.' + ci;
+  const body = h('div', {class: 'body'});
+  body.append(F('Case নাম', txtCtl(p + '.name')),
+    FC('চালু', chkCtl(p + '.on')),
+    F('Action', selCtl(p + '.action', [['BUY', 'BUY (কেনা)'], ['SELL', 'SELL (বিক্রি)']])),
+    F('অপশন', selCtl(p + '.opt', [['CE', 'CE'], ['PE', 'PE']])),
+    F('স্ট্রাইক বাছাই', selCtl(p + '.strike.mode', [['offset', 'ATM / ITM / OTM'], ['prem', 'প্রিমিয়াম কাছাকাছি']], () => renderBuild())));
+  if (c.strike.mode === 'offset') body.append(F('স্ট্রাইক', selCtl(p + '.strike.off', OFFS, null, true)));
+  else body.append(F('প্রিমিয়াম ≈ ₹', numCtl(p + '.strike.prem', c.name + ' প্রিমিয়াম লক্ষ্য', 10)));
+  if (c.strike.mode === 'prem' && S.general.chart === 'prem') body.append(F('প্রিমিয়াম সীমা ± % (সিগন্যালের সময়)', numCtl(p + '.strike.band', 'সীমা %', 5)));
+  body.append(condBlock(ci, 'entry', 'এন্ট্রি শর্ত', 'সিগন্যাল ক্যান্ডেল ক্লোজে, এন্ট্রি পরের বারের ওপেনে'));
+  body.append(condBlock(ci, 'exit', 'এক্সিট শর্ত (ঐচ্ছিক)', 'ফাঁকা = শুধু SL/টার্গেট/স্কয়ার-অফ'));
+  const pr = '(প্রিমিয়ামের উপর)';
+  body.append(h('div', {class: 'sub'}, h('b', {style: 'color:var(--tx)'}, 'SL / টার্গেট ' + pr), h('span', {})));
+  body.append(...[
+    F('Stop Loss', selCtl(p + '.sl.mode', [['none', 'নেই'], ['pct', '% '], ['pts', 'পয়েন্ট']], () => renderBuild())),
+    c.sl.mode !== 'none' ? F('SL মান', numCtl(p + '.sl.val', c.name + ' SL মান', 1)) : null,
+    F('Target', selCtl(p + '.tp.mode', [['none', 'নেই'], ['pct', '%'], ['pts', 'পয়েন্ট'], ['rr', 'RR (×SL)']], () => renderBuild())),
+    c.tp.mode !== 'none' ? F('টার্গেট মান', numCtl(p + '.tp.val', c.name + ' টার্গেট মান', 1)) : null,
+    F('Trailing SL', selCtl(p + '.trail.mode', [['none', 'নেই'], ['step', 'স্টেপ: দাম X সরলে SL Y সরবে'], ['pct', 'পিক থেকে % পিছনে']], () => renderBuild())),
+    c.trail.mode === 'pct' ? F('পিক থেকে দূরত্ব %', numCtl(p + '.trail.val', c.name + ' Trail %', 1)) : null,
+    c.trail.mode === 'pct' ? F('শুরু হবে লাভ ≥ % (0=সাথে সাথে)', numCtl(p + '.trail.act', c.name + ' Trail শুরু %', 1)) : null,
+    c.trail.mode === 'step' ? F('একক', selCtl(p + '.trail.unit', [['pct', '% (এন্ট্রি প্রিমিয়ামের)'], ['pts', 'পয়েন্ট (₹)']], () => renderBuild())) : null,
+    c.trail.mode === 'step' ? F('দাম এগোলে (X)', numCtl(p + '.trail.trig', c.name + ' Trail X', 1)) : null,
+    c.trail.mode === 'step' ? F('SL সরবে (Y)', numCtl(p + '.trail.move', c.name + ' Trail Y', 1)) : null,
+    c.trail.mode === 'step' ? h('div', {class: 'note', style: 'flex:1 1 100%'}, 'উদাহরণ X=10, Y=5: প্রিমিয়াম এন্ট্রি থেকে ১০ এগোলে SL ৫ ওপরে ওঠে, ২০ এগোলে ১০ ওপরে… (শুরুর SL থেকে গোনা)। Y ≤ X রাখুন। হিসাব হয় প্রতিটি বারের শেষে, SL পরের বার থেকে কার্যকর।') : null,
+    FC('Breakeven (লাভ এত % হলে SL = এন্ট্রি)', chkCtl(p + '.be.on', () => renderBuild())),
+    c.be.on ? F('BE ট্রিগার %', numCtl(p + '.be.val', c.name + ' BE %', 1)) : null,
+    F('টাইম স্টপ (মিনিট, 0=বন্ধ)', numCtl(p + '.time_stop', c.name + ' টাইম স্টপ', 5))].filter(Boolean));
+  body.append(...tgBlock(c, p));
+  body.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px'},
+    h('button', {class: 'btn s', on: {click: () => { S.cases.splice(ci + 1, 0, JSON.parse(JSON.stringify(c))); S.cases[ci + 1].name += ' copy'; persist(); renderBuild(); }}}, '⎘ কপি'),
+    h('button', {class: 'btn d s', on: {click: () => { if (S.cases.length > 1 || confirm('শেষ Case মুছবেন?')) { S.cases.splice(ci, 1); persist(); renderBuild(); } }}}, '🗑 মুছুন')));
+  return dtl('case' + ci, ci === 0, h('summary', {}, '④ ' + c.name + ' — ' + c.action + ' ' + c.opt + (c.on ? '' : ' (বন্ধ)')), body);
+}
+
+/* ---------- জব রানার ---------- */
+async function api(path, body) {
+  const r = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : undefined);
+  return r.json();
+}
+let BUSY = false;
+let LASTRUN = null;
+async function saveStrategy(name, note) {
+  name = (name || '').trim();
+  if (!name) { alert('স্ট্র্যাটেজির নাম দিন'); return false; }
+  if (META.presets.user[name] && !confirm('"' + name + '" নামে আগেই সেভ আছে। বদলে নতুনটা সেভ করবেন?')) return false;
+  const snap = JSON.parse(JSON.stringify(S));
+  const m = {saved: new Date().toISOString().slice(0, 16).replace('T', ' '), note: (note || '').trim()};
+  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; m.stats = {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), rr: +a.rr.toFixed(2), from: LAST.meta.from, to: LAST.meta.to}; }
+  snap._meta = m;
+  const r = await api('/api/preset/save', {name, settings: snap});
+  META.presets.user = r.user; renderPresets();
+  $('#status').textContent = '✓ সেভ হয়েছে: ' + name;
+  return true;
+}
+async function runJob(payload, label) {
+  if (BUSY) return null;
+  BUSY = true; $('#run').disabled = true;
+  const st = $('#status'), pg = $('#prog');
+  st.textContent = label + ' চলছে…'; pg.style.width = '2%';
+  try {
+    const s = await api('/api/start', payload);
+    if (s.error) throw new Error(s.error);
+    for (;;) {
+      await new Promise(r => setTimeout(r, 500));
+      const j = await api('/api/job?id=' + s.id);
+      pg.style.width = Math.max(2, (j.progress || 0) * 100) + '%';
+      st.textContent = label + ' ' + Math.round((j.progress || 0) * 100) + '%';
+      if (j.status === 'done') { st.textContent = 'শেষ (' + (j.secs || 0).toFixed(1) + ' সেকেন্ড)'; return j.result; }
+      if (j.status === 'error') throw new Error(j.error);
+    }
+  } catch (e) {
+    st.textContent = 'ত্রুটি: ' + e.message;
+    alert('ত্রুটি: ' + e.message);
+    return null;
+  } finally {
+    BUSY = false; $('#run').disabled = false;
+    setTimeout(() => { pg.style.width = '0'; }, 600);
+  }
+}
+
+/* ---------- রেজাল্ট ---------- */
+const inr = x => (x < 0 ? '−' : '') + '₹' + Math.abs(Math.round(x)).toLocaleString('en-IN');
+const cls = x => x > 0 ? 'pos' : (x < 0 ? 'neg' : '');
+const f1 = x => (x == null ? '–' : Number(x).toFixed(1)), f2 = x => (x == null ? '–' : Number(x).toFixed(2));
+const tbl = (head, rows, mh) => h('div', {class: 'scroll', style: 'max-height:' + (mh || 'none'), html: '<table><tr>' + head.map(x => '<th>' + x + '</th>').join('') + '</tr>' + rows.map(r => '<tr>' + r.map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</table>'});
+const legTxt = t => t.legs ? t.legs.map(l => l.why.replace('Target', 'TP') + '×' + l.q).join('→') : t.reason;
+const csvVal = (c, v) => c === 'legs' ? (v ? v.map(l => l.why + ' x' + l.q + ' @' + l.px + ' ' + l.t).join(' | ') : '') : String(v);
+const pn = (v, d) => '<span class="' + cls(v) + '">' + (d ? v.toFixed(d) : inr(v)) + '</span>';
+function grpTable(root, title, arr, note) {
+  if (!arr || !arr.length) return;
+  root.append(h('h3', {}, title));
+  root.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'গড় ₹', 'RR', 'DD ₹'],
+    arr.map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), pn(r.exp), f2(r.rr), inr(r.dd)])));
+  if (note) root.append(h('div', {class: 'note'}, note));
+}
+function renderResults(res) {
+  LAST = res;
+  const root = $('#t-res'); root.innerHTML = '';
+  const A = res.stats.all, T = res.stats.train, E = res.stats.test, M = res.meta, N = res.an || {};
+  if (!A.n) {
+    root.append(h('div', {class: 'warn'}, 'কোনো ট্রেড হয়নি। শর্ত কড়া হতে পারে, বা সময়সীমা/ডেটা মেলেনি। ' + JSON.stringify(M.skipped)));
+    return;
+  }
+  const kp = (l, v, c) => h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v));
+  root.append(h('div', {class: 'note', style: 'margin-top:0'}, 'ফাইনাল ফল: পুরো ডেটা ' + M.from + ' → ' + M.to + ' (' + M.days + ' দিন), একবারে চালানো।'));
+  (M.warn || []).forEach(w => root.append(h('div', {class: 'warn'}, '⚠ ' + w)));
+  const sn = h('input', {type: 'text', placeholder: 'নাম (যেমন: BB Breakout v3)'}), sno = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
+  root.append(h('details', {class: 'card'}, h('summary', {}, '💾 এই স্ট্র্যাটেজি সেভ করুন'), h('div', {class: 'body'}, F('নাম', sn), F('নোট', sno),
+    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(sn.value, sno.value)}}, 'সেভ'),
+    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সব সেটিং আর এই ফলাফলের সারাংশ সেভ হবে। পরে "প্রিসেট" ট্যাব থেকে লোড করবেন।'))));
+  const hero = h('div', {class: 'kpi hero ' + (A.net >= 0 ? 'up' : 'dn')}, h('small', {}, 'নেট P&L'), h('b', {class: cls(A.net)}, inr(A.net)),
+    h('div', {class: 'hsub'}, [['ট্রেড', A.n], ['Win', A.win.toFixed(1) + '%'], ['PF', f2(A.pf)], ['Max DD', A.dd_pct.toFixed(1) + '%']].map(([k, v]) => h('span', {}, k + ' ', h('i', {}, String(v))))));
+  root.append(h('div', {class: 'kpis'},
+    hero, kp('Profit Factor', f2(A.pf)),
+    kp('Win %', A.win.toFixed(1) + '%'), kp('ট্রেড', A.n),
+    kp('Max Drawdown', inr(A.dd) + ' (' + A.dd_pct.toFixed(1) + '%)', 'neg'), kp('RR (গড় লাভ ÷ গড় লস)', f2(A.rr)),
+    kp('গড় ট্রেড (Expectancy)', inr(A.exp), cls(A.exp)), kp('Recovery (নেট ÷ DD)', f2(A.rec)),
+    kp('লাভজনক মাস', A.pm.toFixed(0) + '% (' + A.nm + ' মাসে)'), kp('মোট খরচ', inr(A.costs))));
+  if (A.n < 100) root.append(h('div', {class: 'warn'}, 'ট্রেড মাত্র ' + A.n + 'টি। ১০০-র কম ট্রেডের ফলে ভরসা কম, ভাগ্যের প্রভাব বেশি থাকে।'));
+  else if (A.pm < 50 && A.net > 0) root.append(h('div', {class: 'warn'}, 'নেট লাভ আছে, কিন্তু অর্ধেকের কম মাস লাভে। লাভ হয়তো কয়েকটা বড় ট্রেডের ওপর নির্ভর করছে।'));
+  root.append(h('h3', {}, 'ইকুইটি কার্ভ'));
+  root.append(h('canvas', {id: 'eq'}));
+  root.append(h('h3', {}, 'ড্রডাউন কার্ভ'));
+  root.append(h('canvas', {id: 'ddc'}));
+  const row = (n, v) => [n, v];
+  root.append(h('h3', {}, 'পুরো পরিসংখ্যান'));
+  root.append(tbl(['মেট্রিক', 'মান'], [
+    row('মোট ট্রেড / দিনে গড়', A.n + ' / ' + f2((N.days || {}).tpd)),
+    row('Gross P&L (খরচের আগে)', pn(A.gross)), row('মোট খরচ', inr(A.costs)), row('নেট P&L', pn(A.net)),
+    row('Profit Factor', f2(A.pf)), row('Win %', A.win.toFixed(1) + '%'),
+    row('গড় লাভ', inr(A.avg_w)), row('গড় লস', inr(A.avg_l)), row('RR (লাভ ÷ লস)', f2(A.rr)),
+    row('গড় R (SL ঝুঁকির গুণিতক)', A.avg_r == null ? 'SL নেই' : f2(A.avg_r) + 'R'),
+    row('Expectancy প্রতি ট্রেড', pn(A.exp)), row('সেরা / খারাপ ট্রেড', inr(A.best) + ' / ' + inr(A.worst)),
+    row('টানা জয় / টানা হার (সর্বোচ্চ)', A.mcw + ' / ' + A.mcl),
+    row('গড় হোল্ডিং সময়', A.hold.toFixed(0) + ' মিনিট'),
+    row('Max Drawdown', inr(A.dd) + ' (' + A.dd_pct.toFixed(1) + '% মূলধনের)'),
+    row('সবচেয়ে লম্বা DD (ট্রেড সংখ্যা)', A.dd_len), row('Recovery Factor', f2(A.rec))]));
+  const D = N.days, I = N.dd_info;
+  if (I) root.append(tbl(['ড্রডাউন ও দিন', ''], [
+    ['সবচেয়ে বড় DD', pn(I.max) + ' (' + I.pct.toFixed(1) + '%)'],
+    ['শিখর → তলা', (I.peak_date || '–') + ' → ' + I.trough_date],
+    ['ঘুরে দাঁড়ানো', I.recovered ? I.rec_date : 'এখনও পুরোপুরি হয়নি'],
+    ['ওই DD-তে ট্রেড', I.trades_in_dd],
+    ['ট্রেড হওয়া দিন / লাভজনক দিন %', D.n + ' / ' + D.win.toFixed(0) + '%'],
+    ['সেরা / খারাপ দিন', inr(D.best) + ' / ' + inr(D.worst)],
+    ['টানা লস দিন (সর্বোচ্চ)', D.mcl]]));
+  if (M.split_date) {
+    root.append(h('h3', {}, 'Train / Test যাচাই (ঐচ্ছিক)'));
+    root.append(tbl(['', 'Train', 'Test'], [['ট্রেড', T.n, E.n], ['নেট', pn(T.net), pn(E.net)], ['PF', f2(T.pf), f2(E.pf)], ['Win%', T.win.toFixed(0) + '%', E.win.toFixed(0) + '%'], ['DD', inr(T.dd), inr(E.dd)]]));
+    root.append(h('div', {class: 'note'}, 'এটা শুধু যাচাইয়ের জন্য। বিভাজন তারিখ: ' + M.split_date + '। বন্ধ করতে সেটিংসে "Train/Test ভাগ" বন্ধ করুন।'));
+  }
+  grpTable(root, '⏰ টাইমিং: এন্ট্রির সময় (৩০ মিনিটের স্লট)', N.by_slot, 'কোন সময়ে এন্ট্রি লাভ/লস দিচ্ছে। খারাপ স্লট বাদ দিতে "এন্ট্রি শুরু/শেষ" বদলান।');
+  grpTable(root, 'সপ্তাহের দিন', N.by_dow);
+  grpTable(root, 'এক্সিটের কারণ', N.by_reason, 'SL-এ যাওয়া ট্রেড বেশি খারাপ হলে SL ঢিলে বা এন্ট্রি আরও বাছাই করুন।');
+  grpTable(root, 'Case অনুযায়ী', N.by_case);
+  grpTable(root, 'CE / PE', N.by_type);
+  grpTable(root, 'এক্সপায়ারি থেকে দূরত্ব (DTE)', N.by_dte);
+  grpTable(root, 'হোল্ডিং সময়', N.by_hold);
+  grpTable(root, 'এন্ট্রির প্রিমিয়াম (₹)', N.by_prem);
+  const X = N.exc, W = N.whatif;
+  if (X && W) {
+    root.append(h('h3', {}, '🎯 SL / টার্গেট / ট্রেইল ঠিক করার প্যানেল'));
+    root.append(h('div', {class: 'note'}, 'MAE = ট্রেডে এন্ট্রির তুলনায় সবচেয়ে বেশি উল্টো যাওয়া, MFE = সবচেয়ে বেশি অনুকূলে যাওয়া (প্রিমিয়ামের %)।'));
+    const q = a => a.map(v => v.toFixed(1) + '%');
+    root.append(tbl(['', 'মধ্যম', '৭৫%', '৯০%', 'সর্বোচ্চ'], [
+      ['জেতা ট্রেডের MAE (' + X.nw + 'টি)'].concat(q(X.mae_w)), ['হারা ট্রেডের MAE (' + X.nl + 'টি)'].concat(q(X.mae_l))]));
+    root.append(h('div', {class: 'note'}, 'SL-এর নিয়ম: জেতা ট্রেডের ৯০% MAE-র একটু বাইরে SL রাখলে বেশিরভাগ জেতা ট্রেড টিকে থাকে।'));
+    root.append(tbl(['', '২৫%', 'মধ্যম', '৭৫%', '৯০%'], [
+      ['জেতা ট্রেডের MFE'].concat(q(X.mfe_w)), ['হারা ট্রেডের MFE'].concat(q(X.mfe_l))]));
+    root.append(h('div', {class: 'note'}, 'লাভ ফেরত যাওয়া (জেতা ট্রেডে শিখর থেকে নামা): মধ্যম ' + X.give_med.toFixed(1) + '%, গড় ' + X.give_avg.toFixed(1) + '% → ট্রেইলিং SL এর আশেপাশে রাখা যায়। হারা ট্রেডের ' + X.l_touch['10'].toFixed(0) + '% একসময় +১০% ছুঁয়েছিল, ' + X.l_touch['20'].toFixed(0) + '% +২০% ছুঁয়েছিল (ব্রেকইভেন/ট্রেইল কাজে লাগতে পারে)।'));
+    root.append(h('h3', {}, 'শুধু SL বদলালে নেট কী হতো (আনুমানিক)'));
+    root.append(tbl(['SL %', 'কাটা ট্রেড', 'নেট ₹', 'PF', 'Win%'], [['এখন', '–', pn(W.now.net), f2(W.now.pf), W.now.win.toFixed(0) + '%']].concat(W.sl.map(r => [r.v + '%', r.cut, pn(r.net), f2(r.pf), r.win.toFixed(0) + '%']))));
+    root.append(h('h3', {}, 'শুধু টার্গেট বদলালে (আনুমানিক)'));
+    root.append(tbl(['TP %', 'নেট ₹', 'PF', 'Win%'], W.tp.map(r => [r.v + '%', pn(r.net), f2(r.pf), r.win.toFixed(0) + '%'])));
+    const g = W.grid;
+    root.append(h('h3', {}, 'SL × টার্গেট গ্রিড (নেট ₹, আনুমানিক)'));
+    let mx = -1e18, mxi = [0, 0]; g.net.forEach((r, i) => r.forEach((v, j) => { if (v > mx) { mx = v; mxi = [i, j]; } }));
+    root.append(tbl(['SL \\ TP'].concat(g.tps.map(x => x + '%')), g.net.map((r, i) => [g.sls[i] + '%'].concat(r.map((v, j) => '<span class="' + cls(v) + '"' + (i === mxi[0] && j === mxi[1] ? ' style="font-weight:700;text-decoration:underline"' : '') + '>' + v + '</span>')))));
+    root.append(h('div', {class: 'note'}, 'এগুলো ট্রেডের MAE/MFE থেকে হিসাব করা অনুমান। একই বারে SL ও TP দুটোই ছুঁলে SL ধরা হয়, আর SL/TP-তে আগে বেরোলে পরের ট্রেডের সময় বদলাতে পারে। তাই ভালো মানগুলো সেটিংসে বসিয়ে আসল Run দিয়ে (বা টিউনিং দিয়ে) নিশ্চিত করুন।'));
+  }
+  const sk = Object.entries(M.skipped).filter(([, v]) => v > 0);
+  if (sk.length) root.append(h('div', {class: 'note'}, 'বাদ পড়া সিগন্যাল: ' + sk.map(([k, v]) => k + ' ' + v).join(', ')));
+  const per = (arr, ttl) => {
+    root.append(h('h3', {}, ttl));
+    root.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'DD ₹'], arr.map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), inr(r.dd)]), '360px'));
+  };
+  per(res.yearly, 'বছর অনুযায়ী'); per(res.monthly, 'মাস অনুযায়ী');
+  root.append(h('h3', {}, 'ট্রেড তালিকা'));
+  const jn = h('input', {type: 'number', inputmode: 'numeric', placeholder: 'ট্রেড নং (১ থেকে ' + res.trades.length + ')', style: 'flex:1'});
+  root.append(h('div', {style: 'display:flex;gap:6px;align-items:center'}, jn,
+    h('button', {class: 'btn p s', on: {click: () => { const n = parseInt(jn.value); if (n >= 1 && n <= res.trades.length) openChart(n - 1); else alert('১ থেকে ' + res.trades.length + ' এর মধ্যে নম্বর দিন'); }}}, '📈 চার্ট দেখুন'),
+    h('button', {class: 'btn s', on: {click: dlCsv}}, '⬇ CSV')));
+  root.append(h('div', {class: 'note'}, 'যেকোনো ট্রেডের সারিতে ট্যাপ করলে সেই দিনের স্পট ও প্রিমিয়াম চার্ট খুলবে।'));
+  const tb = h('div', {class: 'scroll', style: 'margin-top:6px;max-height:520px', html: '<table><tr><th>#</th><th>তারিখ</th><th>ট্রেড</th><th>ইন</th><th>আউট</th><th>এন্ট্রি</th><th>এক্সিট</th><th>কারণ</th><th>MAE%</th><th>MFE%</th><th>R</th><th>নেট ₹</th></tr>' +
+    res.trades.map((t, k) => '<tr data-i="' + k + '" style="cursor:pointer"><td>' + (k + 1) + '</td><td>' + t.date + '</td><td>' + t.side + '</td><td>' + t.in + '</td><td>' + t.out + '</td><td>' + t.entry + '</td><td>' + t.exit + '</td><td>' + legTxt(t) + '</td><td>' + t.mae + '</td><td>' + t.mfe + '</td><td>' + (t.r == null ? '–' : t.r) + '</td><td class="' + cls(t.net) + '">' + Math.round(t.net) + '</td></tr>').join('') + '</table>'});
+  tb.addEventListener('click', e => { const r = e.target.closest('tr[data-i]'); if (r) openChart(parseInt(r.dataset.i)); });
+  root.append(tb);
+}
+/* ---------- একটি ট্রেডের চার্ট (স্পট + প্রিমিয়াম) ---------- */
+const COLS = ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'];
+function hmOf(t) { const d = new Date(t * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }
+/* ---------- চার্ট (নতুন): পিঞ্চ-জুম, ক্রসহেয়ার, সিঙ্ক ---------- */
+let CH = {i: 0};
+const CHS = {view: 'both', hide: {}};
+const CU = '#26c281', CD = '#ff5d5d';
+function fnum(x, rg) { if (x == null || !isFinite(x)) return '–'; return x.toFixed(rg > 80 ? 0 : rg > 6 ? 1 : 2); }
+function niceStep(span) { for (const s of [300, 600, 900, 1800, 3600, 7200]) if (span / s <= 6.5) return s; return 7200; }
+function setupCv(cv, W, H) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv._w = W; cv._h = H; cv._dpr = dpr; cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+}
+function pill(g, txt, x, y, bg, fg, align) {
+  g.font = 'bold 10px sans-serif'; const w = g.measureText(txt).width + 8;
+  const x1 = align === 'center' ? x - w / 2 : align === 'right' ? x - w : x;
+  g.fillStyle = bg; g.beginPath(); (g.roundRect ? g.roundRect(x1, y - 8, w, 16, 4) : g.rect(x1, y - 8, w, 16)); g.fill();
+  g.fillStyle = fg || '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, x1 + w / 2, y + 0.5);
+}
+function drawPane(cv, o, R) {
+  const dpr = cv._dpr, W = cv._w, H = cv._h, g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const padR = 52, padT = 24, padB = o.last ? 20 : 6, x0 = 2, a = R.a, b = R.b;
+  const X = t => x0 + (t - a) / (b - a) * (W - padR - x0);
+  const vis = t => t >= a - 900 && t <= b + 900;
+  let vals = [];
+  (o.bars || []).forEach(k => { if (vis(k.t)) vals.push(k.h, k.l); });
+  (o.lines || []).forEach(L => { if (!L.hide) L.data.forEach(p => { if (vis(p.t)) vals.push(p.v); }); });
+  (o.hl || []).forEach(v => vals.push(v)); (o.hlines || []).forEach(L => vals.push(L.v));
+  g.fillStyle = '#10151d'; g.fillRect(0, 0, W, H);
+  if (!vals.length) { g.fillStyle = '#8b96a8'; g.font = '11px sans-serif'; g.fillText(o.title + ' — এই অংশে ডেটা নেই', 8, 14); return; }
+  let mn = Math.min(...vals), mx = Math.max(...vals); if (mx === mn) { mx += 1; mn -= 1; }
+  const rg = mx - mn, pd = rg * 0.07; mn -= pd; mx += pd;
+  const Y = v => padT + (H - padT - padB) * (1 - (v - mn) / (mx - mn));
+  const dec = (mx - mn);
+  g.font = '10px sans-serif'; g.textBaseline = 'middle';
+  for (let k = 0; k <= 4; k++) {
+    const v = mn + (mx - mn) * k / 4, y = Y(v);
+    g.strokeStyle = '#1c2431'; g.lineWidth = 1; g.beginPath(); g.moveTo(x0, y); g.lineTo(W - padR, y); g.stroke();
+    g.fillStyle = '#7d889b'; g.textAlign = 'left'; g.fillText(fnum(v, dec), W - padR + 5, y);
+  }
+  const ts = niceStep(b - a);
+  for (let t = Math.ceil(a / ts) * ts; t <= b; t += ts) {
+    const x = X(t); g.strokeStyle = '#1c2431'; g.beginPath(); g.moveTo(x, padT); g.lineTo(x, H - padB); g.stroke();
+    if (o.last) { g.fillStyle = '#7d889b'; g.textAlign = 'center'; g.fillText(hmOf(t), x, H - 8); }
+  }
+  // ট্রেডের সময়কাল ও SL/টার্গেট জোন
+  if (o.zone) {
+    const xa = X(o.zone.a), xb = X(o.zone.b);
+    g.fillStyle = o.zone.color; g.fillRect(xa, padT, Math.max(xb - xa, 1), H - padT - padB);
+    (o.bands || []).forEach(bd => { g.fillStyle = bd.color; const y1 = Y(bd.v1), y2 = Y(bd.v2); g.fillRect(xa, Math.min(y1, y2), Math.max(xb - xa, 1), Math.abs(y2 - y1)); });
+  }
+  (o.hl || []).forEach(v => { g.strokeStyle = '#4d5a70'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(x0, Y(v)); g.lineTo(W - padR, Y(v)); g.stroke(); g.setLineDash([]); g.fillStyle = '#7d889b'; g.textAlign = 'left'; g.fillText(v, W - padR + 5, Y(v) - 8); });
+  // BB ব্যান্ড ফিল
+  const up = (o.lines || []).find(L => L.name === 'BB Upper' && !L.hide), lo = (o.lines || []).find(L => L.name === 'BB Lower' && !L.hide);
+  if (up && lo && up.data.length === lo.data.length) {
+    g.fillStyle = 'rgba(86,182,194,.09)'; g.beginPath();
+    up.data.forEach((p, i) => { const x = X(p.t + o.lstep / 2); i ? g.lineTo(x, Y(p.v)) : g.moveTo(x, Y(p.v)); });
+    for (let i = lo.data.length - 1; i >= 0; i--) g.lineTo(X(lo.data[i].t + o.lstep / 2), Y(lo.data[i].v));
+    g.closePath(); g.fill();
+  }
+  // ক্যান্ডেল
+  (o.bars || []).forEach(k => {
+    if (!vis(k.t)) return;
+    const upc = k.c >= k.o, col = upc ? CU : CD, xc = X(k.t + o.step / 2), w = Math.max(1, (X(k.t + o.step) - X(k.t)) * 0.7);
+    g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(xc, Y(k.h)); g.lineTo(xc, Y(k.l)); g.stroke();
+    const y1 = Y(Math.max(k.o, k.c)), y2 = Y(Math.min(k.o, k.c)); g.fillRect(xc - w / 2, y1, w, Math.max(1, y2 - y1));
+  });
+  // ইন্ডিকেটর লাইন
+  (o.lines || []).forEach((L, i) => {
+    if (L.hide) return;
+    g.strokeStyle = L.color || COLS[i % COLS.length]; g.lineWidth = 1.6; g.lineJoin = 'round'; g.beginPath(); let first = true, last = null;
+    L.data.forEach(p => { const x = X(p.t + o.lstep / 2), y = Y(p.v); if (first || (last !== null && p.t - last > o.lstep * 3)) g.moveTo(x, y); else g.lineTo(x, y); first = false; last = p.t; }); g.stroke();
+  });
+  // এন্ট্রি / SL / টার্গেট লেভেল
+  (o.hlines || []).forEach(L => {
+    g.strokeStyle = L.color; g.setLineDash([6, 3]); g.lineWidth = 1.1; g.beginPath(); g.moveTo(x0, Y(L.v)); g.lineTo(W - padR, Y(L.v)); g.stroke(); g.setLineDash([]);
+    pill(g, fnum(L.v, 0.1), W - padR + 1, Y(L.v), L.color, '#0b0f14', 'left');
+    g.fillStyle = L.color; g.font = '10px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(L.name, x0 + 4, Y(L.v) - 7);
+  });
+  // এন্ট্রি → এক্সিট সংযোগ ও মার্কার
+  const mi = (o.marks || []).find(m => m.k === 'in'), mo = (o.marks || []).find(m => m.k === 'out');
+  if (mi && mo) { g.strokeStyle = mo.win ? CU : CD; g.setLineDash([3, 3]); g.lineWidth = 1.4; g.beginPath(); g.moveTo(X(mi.t + o.step / 2), Y(mi.p)); g.lineTo(X(mo.t + o.step / 2), Y(mo.p)); g.stroke(); g.setLineDash([]); }
+  (o.marks || []).forEach(m => {
+    if (m.k === 'part') { const px_ = X(m.t + o.step / 2), py_ = Y(m.p); g.fillStyle = '#f5c542'; g.beginPath(); g.moveTo(px_, py_ - 6); g.lineTo(px_ + 6, py_); g.lineTo(px_, py_ + 6); g.lineTo(px_ - 6, py_); g.closePath(); g.fill();
+      pill(g, m.why + ' ×' + m.q + ' ' + fnum(m.p, 100), Math.min(Math.max(px_, 46), W - padR - 46), py_ - 20, '#f5c542', '#0b0f14', 'center'); return; }
+    const x = X(m.t + o.step / 2), y = Y(m.p), inn = m.k === 'in', col = inn ? '#4f9cff' : (m.win ? CU : CD);
+    g.fillStyle = col; g.beginPath();
+    if (inn) { g.moveTo(x, y + 3); g.lineTo(x - 6, y + 13); g.lineTo(x + 6, y + 13); } else { g.moveTo(x, y - 3); g.lineTo(x - 6, y - 13); g.lineTo(x + 6, y - 13); }
+    g.closePath(); g.fill();
+    pill(g, (inn ? 'IN ' : 'OUT ') + fnum(m.p, 100), Math.min(Math.max(x, 36), W - padR - 36), inn ? y + 25 : y - 25, col, '#0b0f14', 'center');
+  });
+  // শিরোনাম + লেজেন্ড (ট্যাপ করলে লুকায়/দেখায়)
+  g.textAlign = 'left'; g.textBaseline = 'alphabetic'; let lx = 6; o._leg = [];
+  g.font = 'bold 11px sans-serif'; g.fillStyle = '#e8ebf0'; g.fillText(o.title, lx, 14); lx += g.measureText(o.title).width + 10; g.font = '10px sans-serif';
+  (o.lines || []).forEach((L, i) => {
+    const col = L.color || COLS[i % COLS.length], t = '● ' + L.name, w = g.measureText(t).width;
+    if (L.name) { g.fillStyle = L.hide ? '#4d5a70' : col; g.fillText(t, lx, 14); o._leg.push({n: L.name, a: lx - 3, b: lx + w + 3}); lx += w + 10; }
+  });
+  // ক্রসহেয়ার
+  if (R.cx != null) {
+    const x = X(R.cx);
+    if (x >= x0 && x <= W - padR) {
+      g.strokeStyle = '#9aa7bb'; g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(x, padT); g.lineTo(x, H - padB); g.stroke();
+      if (R.cy != null && R.cid === o.id) {
+        g.beginPath(); g.moveTo(x0, R.cy); g.lineTo(W - padR, R.cy); g.stroke();
+        const v = mn + (mx - mn) * (1 - (R.cy - padT) / (H - padT - padB));
+        g.setLineDash([]); pill(g, fnum(v, dec), W - padR + 1, R.cy, '#3a4658', '#fff', 'left');
+      }
+      g.setLineDash([]);
+      if (o.last) pill(g, hmOf(R.cx), x, H - 9, '#3a4658', '#fff', 'center');
+    }
+  }
+  g.setLineDash([]);
+}
+async function openChart(i) {
+  if (!LAST || !LAST.trades.length) return;
+  i = Math.max(0, Math.min(LAST.trades.length - 1, i)); CH.i = i;
+  let ov = $('#chOv'); if (!ov) { ov = h('div', {id: 'chOv', style: 'position:fixed;inset:0;background:#0b0f14;z-index:30;overflow:auto;-webkit-overflow-scrolling:touch'}); document.body.append(ov); }
+  ov.innerHTML = ''; ov.hidden = false;
+  const T = LAST.trades[i], N = LAST.trades.length, win = T.net > 0;
+  const nav = h('div', {style: 'position:sticky;top:0;z-index:6;background:#0b0f14ee;border-bottom:1px solid #2a3445;padding:8px 10px;display:flex;gap:6px;align-items:center'},
+    h('button', {class: 'btn s', on: {click: () => openChart(i - 1)}}, '◀'),
+    h('div', {style: 'flex:1;text-align:center;line-height:1.2'}, h('b', {}, 'ট্রেড #' + (i + 1) + ' / ' + N), h('div', {style: 'font-size:11px;color:#8b96a8'}, T.date + ' (' + T.dow + ') · ' + T.case)),
+    h('button', {class: 'btn s', on: {click: () => openChart(i + 1)}}, '▶'),
+    h('button', {class: 'btn s', on: {click: () => { const e = ov; if (document.fullscreenElement) document.exitFullscreen(); else if (e.requestFullscreen) e.requestFullscreen().catch(() => {}); }}}, '⤢'),
+    h('button', {class: 'btn s d', on: {click: () => { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); ov.hidden = true; window.removeEventListener('resize', ov._rs || (() => {})); }}}, '✕'));
+  ov.append(nav);
+  const pc = win ? '#26c281' : '#ff5d5d';
+  ov.append(h('div', {style: 'margin:8px 10px;padding:10px 12px;border:1px solid #2a3445;border-left:4px solid ' + pc + ';border-radius:10px;background:#131922'},
+    h('div', {style: 'display:flex;justify-content:space-between;align-items:baseline;gap:8px'},
+      h('span', {style: 'font-weight:600'}, T.side), h('b', {style: 'font-size:20px;color:' + pc}, inr(T.net))),
+    h('div', {style: 'font-size:12px;color:#8b96a8;margin-top:4px'}, 'এক্সপায়ারি ' + T.expiry + ' · DTE ' + T.dte),
+    h('div', {style: 'display:flex;flex-wrap:wrap;gap:6px;margin-top:8px'},
+      [['ইন', T.in + ' @ ' + T.entry], ['আউট', T.out + ' @ ' + T.exit], ['কারণ', T.reason], ['হোল্ড', T.hold + ' মি'], ['MAE', T.mae + '%'], ['MFE', T.mfe + '%'], ['R', T.r == null ? '–' : T.r]]
+        .map(([k, v]) => h('span', {style: 'font-size:11px;background:#1b2330;border:1px solid #2a3445;border-radius:6px;padding:2px 7px'}, k + ' ', h('b', {}, String(v))))),
+    T.legs ? h('div', {style: 'margin-top:8px;font-size:11px;color:#8b96a8'}, 'আংশিক বুকিং: ', T.legs.map(l => h('span', {style: 'display:inline-block;margin:2px 6px 0 0;background:#1b2330;border:1px solid #2a3445;border-radius:6px;padding:2px 7px;color:#e8ebf0'}, l.why + ' ×' + l.q + ' লট @ ' + l.px + ' (' + l.t + ')'))) : null));
+  const loading = h('div', {class: 'note', style: 'margin:10px'}, 'চার্ট লোড হচ্ছে...'); ov.append(loading);
+  let d;
+  try { d = await api('/api/chart', {settings: JSON.parse(LASTRUN || JSON.stringify(S)), date: T.date, side: T.side, expiry: T.expiry, in: T.in, out: T.out, entry: T.entry, exit: T.exit, case: T.case, legs: T.legs}); } catch (e) { d = {error: String(e)}; }
+  loading.remove();
+  if (d.error) { ov.append(h('div', {class: 'warn', style: 'margin:10px'}, 'চার্ট আনা যায়নি: ' + d.error)); return; }
+  const t0 = d.spot[0].t, t1 = t0 + 375 * 60, full = t1 - t0, base = d.base * 60, tfs = d.tf * 60;
+  const mIn = d.marks.prem.find(m => m.k === 'in'), mOut = d.marks.prem.find(m => m.k === 'out');
+  const R = {a: t0, b: t1, cx: null, cy: null, cid: null};
+  const zone = mIn && mOut ? {a: mIn.t, b: mOut.t + base, color: win ? 'rgba(38,194,129,.07)' : 'rgba(255,93,93,.07)'} : null;
+  const lv = nm => (d.lines || []).find(l => l.name === nm);
+  const bands = [];
+  if (lv('এন্ট্রি') && lv('SL')) bands.push({v1: lv('এন্ট্রি').v, v2: lv('SL').v, color: 'rgba(255,93,93,.10)'});
+  if (lv('এন্ট্রি') && lv('টার্গেট')) bands.push({v1: lv('এন্ট্রি').v, v2: lv('টার্গেট').v, color: 'rgba(38,194,129,.10)'});
+  const ctl = h('div', {style: 'display:flex;gap:6px;flex-wrap:wrap;margin:0 10px 8px'});
+  ov.append(ctl);
+  const info = h('div', {style: 'margin:0 10px 8px;min-height:88px;font-size:12px;line-height:1.5;background:#131922;border:1px solid #2a3445;border-radius:8px;padding:6px 9px;color:#c7d0de'}, 'চার্টে আঙুল রাখুন বা টানুন: ক্রসহেয়ার ও মান দেখাবে। দুই আঙুলে জুম/সরানো, ডবল-ট্যাপে পুরো দিন। ওপরের নামে ট্যাপ করলে ইন্ডিকেটর লুকাবে।');
+  ov.append(info);
+  const box = h('div', {style: 'position:relative;margin:0 0 6px;touch-action:pan-y;user-select:none;-webkit-user-select:none'}); ov.append(box);
+  let panes = [];
+  const mk = (id, h_, o) => { const cv = h('canvas', {style: 'display:block;border-bottom:1px solid #1c2431;touch-action:pan-y'}); cv._id = id; cv._H = h_; cv._o = o; return cv; };
+  const lines = (arr, tag) => (arr || []).map(x => ({name: x.name, data: x.data, hide: !!CHS.hide[tag + x.name], tag}));
+  function build() {
+    box.innerHTML = ''; panes = [];
+    const v = CHS.view, single = v !== 'both', Hm = single ? 330 : 250;
+    const list = [];
+    if (v !== 'prem') {
+      list.push(['spot', Hm, {title: 'স্পট ' + d.tf + 'm', bars: d.spot, step: tfs, lstep: tfs, lines: lines(d.overlays, 's:'), zone, marks: d.marks.spot.map(m => Object.assign({win}, m))}]);
+      (d.panes || []).forEach((p, k) => list.push(['sp' + k, 110, {title: p.name, step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
+    }
+    if (v !== 'spot' && d.prem.length) {
+      list.push(['prem', Hm, {title: 'প্রিমিয়াম ' + T.side.replace(/^BUY |^SELL /, '') + (d.pmode ? ' · ' + d.tf + 'm সিগন্যাল' : ''), bars: d.prem, step: base, lstep: tfs, lines: lines(d.pov, 'p:'), hlines: d.lines, zone, bands, marks: d.marks.prem.map(m => Object.assign({win}, m))}]);
+      (d.ppan || []).forEach((p, k) => list.push(['pp' + k, 110, {title: p.name + ' (প্রিমিয়াম)', step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
+    }
+    if (v !== 'spot' && !d.prem.length) box.append(h('div', {class: 'warn', style: 'margin:10px'}, 'এই কন্ট্র্যাক্টের প্রিমিয়াম ডেটা পাওয়া যায়নি।'));
+    list.forEach(([id, H_, o], k) => { o.id = id; o.last = k === list.length - 1; const cv = mk(id, H_, o); box.append(cv); panes.push(cv); });
+    resize();
+  }
+  function resize() { const W = Math.max(box.clientWidth, 200); panes.forEach(cv => setupCv(cv, W, cv._H)); redraw(); }
+  let raf = 0;
+  function redraw() { if (raf) return; raf = requestAnimationFrame(() => { raf = 0; panes.forEach(cv => drawPane(cv, cv._o, R)); }); }
+  const plotW = () => (panes[0] ? panes[0]._w : 300) - 52 - 2;
+  const tAt = x => R.a + (x - 2) / plotW() * (R.b - R.a);
+  function setRange(a, b) {
+    const minS = Math.max(base * 6, 1080); let span = Math.min(Math.max(b - a, minS), full);
+    const c = (a + b) / 2; a = c - span / 2; b = c + span / 2;
+    if (a < t0) { b += t0 - a; a = t0; } if (b > t1) { a -= b - t1; b = t1; }
+    R.a = Math.max(a, t0); R.b = Math.min(b, t1); redraw();
+  }
+  const fitDay = () => setRange(t0, t1);
+  const fitTrade = () => { if (mIn && mOut) setRange(mIn.t - 40 * 60, mOut.t + 40 * 60); };
+  const zoom = k => { const c = (R.a + R.b) / 2, s = (R.b - R.a) * k / 2; setRange(c - s, c + s); };
+  const pan = k => { const s = (R.b - R.a) * k; setRange(R.a + s, R.b + s); };
+  const chip = (txt, fn, on) => h('button', {class: 'btn s', style: on ? 'background:#4f9cff;border-color:#4f9cff;color:#fff' : '', on: {click: fn}}, txt);
+  function drawCtl() {
+    ctl.innerHTML = '';
+    [['both', 'দুটোই'], ['spot', 'স্পট'], ['prem', 'প্রিমিয়াম']].forEach(([k, t]) => ctl.append(chip(t, () => { CHS.view = k; drawCtl(); build(); }, CHS.view === k)));
+    ctl.append(chip('পুরো দিন', fitDay), chip('ট্রেডে ফোকাস', fitTrade), chip('＋', () => zoom(0.6)), chip('－', () => zoom(1.6)), chip('⟵', () => pan(-0.3)), chip('⟶', () => pan(0.3)));
+  }
+  const find = (arr, t, step) => arr.find(k => t >= k.t && t < k.t + step);
+  function showInfo(t) {
+    const a = find(d.spot, t, tfs), b = find(d.prem, t, base), rows = [];
+    const cl = (x, rg) => x ? 'O ' + fnum(x.o, rg) + ' H ' + fnum(x.h, rg) + ' L ' + fnum(x.l, rg) + ' C ' + fnum(x.c, rg) : '–';
+    const colr = x => x ? (x.c >= x.o ? CU : CD) : '#8b96a8';
+    const sp = h('div', {}, h('b', {}, hmOf(t) + '  '), 'স্পট ', h('span', {style: 'color:' + colr(a)}, cl(a, 100)));
+    const pr = h('div', {}, 'প্রিমিয়াম ', h('span', {style: 'color:' + colr(b)}, cl(b, 10)));
+    info.innerHTML = ''; info.append(sp, pr);
+    const iv = [];
+    const val = (L, step) => { const p = L.data.find(q => t >= q.t && t < q.t + step); return p ? L.name + ' ' + p.v.toFixed(2) : null; };
+    [...(d.overlays || []), ...(d.panes || [])].forEach(L => { const s = val(L, tfs); if (s) iv.push(s); });
+    [...(d.pov || []), ...(d.ppan || [])].forEach(L => { const s = val(L, tfs); if (s) iv.push(s + ' (প্রি)'); });
+    if (iv.length) info.append(h('div', {style: 'color:#8b96a8'}, iv.join(' · ')));
+  }
+  // টাচ/মাউস
+  const P = new Map(); let pinch = null, tapAt = 0, moved = 0, startXY = null;
+  const local = e => { for (const cv of panes) { const r = cv.getBoundingClientRect(); if (e.clientY >= r.top && e.clientY <= r.bottom) return {cv, x: e.clientX - r.left, y: e.clientY - r.top}; } const r = panes[0].getBoundingClientRect(); return {cv: panes[0], x: e.clientX - r.left, y: 0}; };
+  function cross(e) {
+    const L = local(e), t = tAt(L.x), snapped = t0 + Math.floor((t - t0) / base) * base + base / 2;
+    if (t < t0 || t > t1) return;
+    R.cx = snapped; R.cy = L.y; R.cid = L.cv._id; showInfo(snapped); redraw();
+  }
+  box.addEventListener('pointerdown', e => {
+    if (!panes.length) return;
+    P.set(e.pointerId, {x: e.clientX, y: e.clientY}); moved = 0; startXY = {x: e.clientX, y: e.clientY};
+    try { box.setPointerCapture(e.pointerId); } catch (_) {}
+    if (P.size === 2) { const [p, q] = [...P.values()]; const r = box.getBoundingClientRect(); pinch = {d: Math.hypot(p.x - q.x, p.y - q.y) || 1, a: R.a, b: R.b, m: (p.x + q.x) / 2 - r.left}; R.cx = null; }
+    else if (e.pointerType !== 'mouse' || e.button === 0) cross(e);
+  });
+  box.addEventListener('pointermove', e => {
+    if (!panes.length) return;
+    const prev = P.get(e.pointerId);
+    if (prev) { moved += Math.abs(e.clientX - prev.x) + Math.abs(e.clientY - prev.y); P.set(e.pointerId, {x: e.clientX, y: e.clientY}); }
+    if (P.size >= 2 && pinch) {
+      const [p, q] = [...P.values()], r = box.getBoundingClientRect(), dist = Math.hypot(p.x - q.x, p.y - q.y) || 1, mid = (p.x + q.x) / 2 - r.left;
+      const span = (pinch.b - pinch.a) * pinch.d / dist, tc = pinch.a + (pinch.m - 2) / plotW() * (pinch.b - pinch.a);
+      const f = (mid - 2) / plotW(); setRange(tc - f * span, tc - f * span + span); return;
+    }
+    if (e.pointerType === 'mouse') {
+      if (e.buttons & 1 && prev) { const dx = e.clientX - prev.x; const s = -dx / plotW() * (R.b - R.a); setRange(R.a + s, R.b + s); }
+      else cross(e);
+    } else if (prev) cross(e);
+  });
+  const up = e => {
+    const had = P.delete(e.pointerId); if (P.size < 2) pinch = null;
+    if (!had || P.size) return;
+    if (moved < 8) {
+      const L = local(e), o = L.cv._o;
+      if (L.y < 22 && o._leg) { const hit = o._leg.find(z => L.x >= z.a && L.x <= z.b); if (hit) { const key = (o.id.startsWith('p') && o.id !== 'prem' ? 'p:' : (o.id === 'prem' ? 'p:' : 's:')) + hit.n; CHS.hide[key] = !CHS.hide[key]; build(); return; } }
+      const now = Date.now(); if (now - tapAt < 320) { fitDay(); tapAt = 0; } else tapAt = now;
+    }
+  };
+  box.addEventListener('pointerup', up); box.addEventListener('pointercancel', e => { P.delete(e.pointerId); pinch = null; });
+  box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') { R.cx = null; redraw(); } });
+  box.addEventListener('wheel', e => { e.preventDefault(); const L = local(e), t = tAt(L.x), k = e.deltaY > 0 ? 1.18 : 0.85, f = (L.x - 2) / plotW(); const span = (R.b - R.a) * k; setRange(t - f * span, t - f * span + span); }, {passive: false});
+  ov._rs && window.removeEventListener('resize', ov._rs); ov._rs = () => resize(); window.addEventListener('resize', ov._rs);
+  drawCtl(); build();
+  ov.append(h('div', {class: 'note', style: 'margin:0 10px 24px'}, 'IN = এন্ট্রি (নীল), OUT = এক্সিট (সবুজ/লাল)। প্রিমিয়ামে নীল রেখা = এন্ট্রি, লাল = প্রথম SL, সবুজ = টার্গেট; হালকা লাল/সবুজ জোন = ঝুঁকি/লাভের এলাকা। ইন্ডিকেটর শুধু এই Case-এর শর্তে ব্যবহার হওয়াগুলো দেখায়।'));
+}
+function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
+function drawLine(id, arr, color, fill) {
+  const cv = $('#' + id); if (!cv || !arr || !arr.length) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W) return;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const e = [0].concat(arr), mn = Math.min(...e, 0), mx = Math.max(...e, 0), padL = 8, padR = 8, padT = 16, padB = 14;
+  const X = i => padL + (W - padL - padR) * i / Math.max(e.length - 1, 1), Y = v => H - padB - (H - padT - padB) * (v - mn) / Math.max(mx - mn, 1);
+  g.font = '10px sans-serif'; g.textBaseline = 'middle';
+  for (let k = 0; k <= 3; k++) {
+    const v = mn + (mx - mn) * k / 3, y = Y(v);
+    g.strokeStyle = '#16251d'; g.lineWidth = 1; g.beginPath(); g.moveTo(padL, y); g.lineTo(W - padR, y); g.stroke();
+    g.fillStyle = '#5d7268'; g.textAlign = 'left'; g.fillText(Math.round(v).toLocaleString('en-IN'), padL + 2, y - 7);
+  }
+  g.strokeStyle = '#2f4a3b'; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(padL, Y(0)); g.lineTo(W - padR, Y(0)); g.stroke(); g.setLineDash([]);
+  const up = e[e.length - 1] >= 0, lc = id === 'eq' ? (up ? '#2ee27d' : '#ff5a67') : color;
+  const grd = g.createLinearGradient(0, padT, 0, H - padB); grd.addColorStop(0, rgba(lc, id === 'eq' ? .30 : .26)); grd.addColorStop(1, rgba(lc, 0));
+  g.beginPath(); e.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v)));
+  g.lineTo(X(e.length - 1), Y(0)); g.lineTo(X(0), Y(0)); g.closePath(); g.fillStyle = grd; g.fill();
+  g.strokeStyle = lc; g.lineWidth = 2; g.lineJoin = 'round'; g.shadowColor = lc; g.shadowBlur = 8; g.beginPath();
+  e.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); g.shadowBlur = 0;
+  const lx = X(e.length - 1), ly = Y(e[e.length - 1]), lab = Math.round(e[e.length - 1]).toLocaleString('en-IN'), w = g.measureText(lab).width + 12;
+  g.fillStyle = lc; g.beginPath(); g.arc(lx, ly, 3.5, 0, 7); g.fill();
+  g.fillStyle = lc; g.beginPath(); (g.roundRect ? g.roundRect(Math.min(lx - w, W - padR - w), Math.max(ly - 22, 2), w, 16, 5) : g.rect(Math.min(lx - w, W - padR - w), Math.max(ly - 22, 2), w, 16)); g.fill();
+  g.fillStyle = '#04140a'; g.textAlign = 'center'; g.font = 'bold 10px sans-serif'; g.fillText(lab, Math.min(lx - w, W - padR - w) + w / 2, Math.max(ly - 22, 2) + 8.5);
+}
+function drawEq() {
+  if (!LAST) return;
+  drawLine('eq', LAST.equity, '#2ee27d');
+  drawLine('ddc', (LAST.an || {}).dd, '#ff6161', 'rgba(255,97,97,.18)');
+}
+function dlCsv() {
+  const T = LAST.trades, cols = Object.keys(T[0]);
+  const csv = [cols.join(',')].concat(T.map(t => cols.map(c => '"' + csvVal(c, t[c]).replace(/"/g, '""') + '"').join(','))).join('\n');
+  const a = h('a', {href: URL.createObjectURL(new Blob([csv], {type: 'text/csv'})), download: 'trades.csv'}); document.body.append(a); a.click(); a.remove();
+}
+
+/* ---------- টিউনিং ---------- */
+function rangeVals(from, to, step) {
+  const out = []; if (!(step > 0)) return [from];
+  for (let v = from, n = 0; v <= to + 1e-9 && n < 80; v += step, n++) out.push(Math.round(v * 1e6) / 1e6);
+  return out;
+}
+function renderTune() {
+  const root = $('#t-tune'); root.innerHTML = '';
+  if (!SW.length) return;
+  const opts = SW.map((s, i) => [i, s.label]);
+  const pick = (key, none) => {
+    const T = TUNE[key], s = h('select');
+    if (none) s.append(h('option', {value: -1}, '— নেই —'));
+    opts.forEach(([v, t]) => s.append(h('option', {value: v}, t)));
+    s.value = T.i; if (T.i >= SW.length) { T.i = none ? -1 : 0; s.value = T.i; }
+    s.addEventListener('change', () => { T.i = parseInt(s.value); const cur = T.i >= 0 ? getp(SW[T.i].path) : 0; if (T.i >= 0) { T.from = cur; T.to = cur * 2 || 10; T.step = Math.max(cur / 2, 1) || 1; } renderTune(); });
+    const num = (k, l) => { const i = h('input', {type: 'number', step: 'any', value: T[k]}); i.addEventListener('change', () => T[k] = parseFloat(i.value) || 0); return F(l, i); };
+    return h('div', {class: 'body'}, F(none ? 'দ্বিতীয় প্যারামিটার' : 'প্যারামিটার', s), T.i >= 0 ? [num('from', 'শুরু'), num('to', 'শেষ'), num('step', 'ধাপ')] : null,
+      T.i >= 0 ? h('div', {class: 'note', style: 'flex:1 1 100%'}, 'এখনকার মান: ' + getp(SW[T.i].path) + ' | মান: ' + rangeVals(T.from, T.to, T.step).join(', ')) : null);
+  };
+  root.append(h('div', {class: 'note'}, 'এখন সেটিংস ট্যাবে যা আছে সেটাই বেস। এক বা দুটি সংখ্যা বেছে রেঞ্জ দিন, সব কম্বিনেশন ব্যাকটেস্ট হবে (সর্বোচ্চ ১৫০)। ফলাফল পুরো ডেটার ওপর, ✓ চিহ্নিত আর আশপাশের মানও ভালো এমন সেটিং বাছুন।'));
+  root.append(h('div', {class: 'card'}, pick('a', false)));
+  root.append(h('div', {class: 'card'}, pick('b', true)));
+  const mt = h('input', {type: 'number', value: TUNE.min}); mt.addEventListener('change', () => TUNE.min = parseInt(mt.value) || 0);
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ন্যূনতম ট্রেড (সব)', mt),
+    h('button', {class: 'btn g', style: 'align-self:flex-end', on: {click: doSweep}}, '🎛 টিউনিং চালান'))));
+  root.append(h('div', {id: 'sweepRes'}));
+}
+async function doSweep() {
+  const params = [];
+  for (const k of ['a', 'b']) {
+    const T = TUNE[k]; if (T.i < 0) continue;
+    const vals = rangeVals(T.from, T.to, T.step);
+    params.push({path: SW[T.i].path, label: SW[T.i].label, values: vals});
+  }
+  if (!params.length) return;
+  const res = await runJob({kind: 'sweep', settings: S, params}, 'টিউনিং');
+  if (res) { LASTSWEEP = res; renderSweep(); }
+}
+let LASTSWEEP = null;
+function renderSweep() {
+  const box = $('#sweepRes'); if (!box || !LASTSWEEP) return;
+  const R = LASTSWEEP, sorters = {net: r => r.all.net, pf: r => r.all.pf, dd: r => r.all.dd, exp: r => r.all.exp, pm: r => r.all.pm, rec: r => r.all.rec, rr: r => r.all.rr};
+  if (!(TUNE.sort in sorters)) TUNE.sort = 'net';
+  let rows = R.rows.filter(r => r.all.n >= TUNE.min);
+  rows = rows.slice().sort((a, b) => sorters[TUNE.sort](b) - sorters[TUNE.sort](a));
+  const sel = h('select', {on: {change: e => { TUNE.sort = e.target.value; renderSweep(); }}});
+  [['net', 'সবচেয়ে বেশি নেট'], ['pf', 'সবচেয়ে ভালো PF'], ['rec', 'Recovery (নেট ÷ DD)'], ['dd', 'সবচেয়ে কম Drawdown'], ['pm', 'বেশি লাভজনক মাস %'], ['exp', 'গড় ট্রেড'], ['rr', 'RR']].forEach(([v, t]) => sel.append(h('option', {value: v}, t)));
+  sel.value = TUNE.sort;
+  box.innerHTML = '';
+  box.append(h('h3', {}, 'ফল (' + rows.length + '/' + R.rows.length + ')'), F('সাজান', sel));
+  if (!rows.length) { box.append(h('div', {class: 'note'}, 'ন্যূনতম ট্রেড শর্তে কিছু মেলেনি।')); return; }
+  const head = R.labels.map(l => '<th>' + l.replace(/\[.*?\]/, '') + '</th>').join('');
+  const body = rows.slice(0, 80).map(r => {
+    const ok = r.all.net > 0 && r.all.pf >= 1.2 && r.all.pm >= 50;
+    const id = R.rows.indexOf(r);
+    return '<tr>' + r.vals.map(v => '<td>' + v + '</td>').join('') + '<td>' + r.all.n + '</td><td class="' + cls(r.all.net) + '">' + Math.round(r.all.net) + '</td><td>' + r.all.pf.toFixed(2) + '</td><td>' + r.all.win.toFixed(0) + '%</td><td>' + Math.round(r.all.dd) + '</td><td>' + r.all.rr.toFixed(2) + '</td><td>' + r.all.pm.toFixed(0) + '%</td><td>' + (ok ? '✓' : '') + '</td><td><button class="btn s" data-a="' + id + '">লাগান</button></td></tr>';
+  }).join('');
+  const t = h('div', {class: 'scroll', html: '<table><tr>' + head + '<th>ট্রেড</th><th>নেট ₹</th><th>PF</th><th>Win%</th><th>DD ₹</th><th>RR</th><th>মাস+</th><th>✓</th><th></th></tr>' + body + '</table>'});
+  t.addEventListener('click', e => {
+    const b = e.target.closest('button[data-a]'); if (!b) return;
+    const r = R.rows[parseInt(b.dataset.a)];
+    R.paths.forEach((p, i) => setp(p, r.vals[i]));
+    renderBuild(); showTab('build'); $('#status').textContent = 'সেটিং লাগানো হয়েছে, ▶ Run চাপুন';
+  });
+  box.append(t, h('div', {class: 'note'}, '✓ = নেট লাভ, PF ≥ ১.২ এবং অন্তত অর্ধেক মাস লাভে। সবচেয়ে ভালো একটা সংখ্যার দিকে না তাকিয়ে এমন মান বাছুন যার আশেপাশের মানগুলোও ভালো, তাতে ভাগ্যের ওপর নির্ভরতা কমে।'));
+}
+
+/* ---------- প্রিসেট ---------- */
+function renderPresets() {
+  const root = $('#t-pre'); root.innerHTML = '';
+  const nm = h('input', {type: 'text', placeholder: 'স্ট্র্যাটেজির নাম'}), nt = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, F('বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt),
+    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value)}}, '💾 সেভ'),
+    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সেভ ফাইল: presets.json (algo_builder.py-র ফোল্ডারে)। ব্যাকআপের জন্য এই ফাইলটা কপি করে রাখুন।'))));
+  const list = (title, obj, user) => {
+    const box = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, title));
+    const b = h('div', {class: 'body'});
+    const ks = Object.keys(obj);
+    if (!ks.length) b.append(h('div', {class: 'note'}, 'কিছু নেই'));
+    ks.forEach(k => { const mt = (obj[k] || {})._meta; b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap'}, h('span', {style: 'flex:1 1 60%'}, k),
+      h('button', {class: 'btn s', on: {click: () => { S = fixSettings(obj[k]); persist(); renderBuild(); showTab('build'); }}}, 'লোড'),
+      user ? h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + k + '" মুছবেন?')) return; const r = await api('/api/preset/delete', {name: k}); META.presets.user = r.user; renderPresets(); }}}, '🗑') : null,
+      mt ? h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (mt.stats ? 'ট্রেড ' + mt.stats.n + ' | নেট ₹' + mt.stats.net + ' | PF ' + mt.stats.pf + ' | Win ' + mt.stats.win + '% | DD ₹' + mt.stats.dd + ' | ' + mt.stats.from + ' → ' + mt.stats.to : 'সেভের সময় ব্যাকটেস্ট ছিল না') + ' | ' + mt.saved + (mt.note ? ' | ' + mt.note : '')) : null)); });
+    box.append(b); root.append(box);
+  };
+  list('আমার প্রিসেট', META.presets.user, true);
+  list('নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)', META.presets.builtin, false);
+  const ta = h('textarea', {rows: 6, placeholder: 'এখানে JSON পেস্ট করে Import করুন', style: 'font-family:monospace;font-size:11px'});
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, ta,
+    h('button', {class: 'btn s', on: {click: () => { ta.value = JSON.stringify(S, null, 1); }}}, 'Export (বর্তমান সেটিং)'),
+    h('button', {class: 'btn s', on: {click: () => { try { S = fixSettings(JSON.parse(ta.value)); persist(); renderBuild(); showTab('build'); } catch (e) { alert('JSON ঠিক নেই: ' + e.message); } }}}, 'Import'),
+    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
+}
+
+
+function renderData() {
+  const root = $('#t-data'); root.innerHTML = '';
+  if (!META) return;
+  const i = META.info;
+  if (META.datasets) {
+    const ds = META.datasets;
+    const sel = h('select', {}, ...ds.map(d => h('option', {value: d.inst, selected: d.inst === i.inst}, d.name + ' — স্পট ' + d.spot_from + ' → ' + d.spot_to + (d.contracts ? ' | অপশন ' + d.done + '/' + d.contracts + ' কন্ট্র্যাক্ট' : ' | অপশন নেই'))));
+    const f0 = h('input', {type: 'date', value: i.from || ''}), f1 = h('input', {type: 'date', value: i.to || ''});
+    const msg = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'ইনডেক্স ও সময় বেছে "লোড করুন" চাপুন। তারিখ ফাঁকা রাখলে শেষ ~৬ মাস। সময় যত বেশি, মেমোরি ও লোড তত বেশি।');
+    const btn = h('button', {class: 'btn s'}, '⬇ লোড করুন');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true; msg.textContent = 'লোড হচ্ছে… (১-২ মিনিট লাগতে পারে, অপেক্ষা করুন)';
+      try {
+        const r = await api('/api/load', {inst: sel.value, from: f0.value, to: f1.value});
+        if (r.error) throw new Error(r.error);
+        META = await api('/api/meta');
+        const ni = META.info; setBase(ni.base || 5);
+        $('#dinfo').innerHTML = [(ni.name || ''), ni.spot_from + ' → ' + ni.spot_to, ni.spot_days + ' দিন', ni.expiries.length + ' এক্সপায়ারি', ni.contracts + ' কন্ট্র্যাক্ট', (ni.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+        if (S.general.tf % (ni.base || 5)) S.general.tf = (5 % (ni.base || 5) === 0) ? 5 : (ni.base || 5);
+        S.general.from = ''; S.general.to = '';
+        persist(); renderBuild(); renderData();
+        if (r.info && r.info.warn) alert(r.info.warn);
+      } catch (e) { msg.textContent = 'ত্রুটি: ' + e.message; btn.disabled = false; }
+    });
+    root.append(h('div', {class: 'h2'}, 'ডেটাসেট বেছে নিন'));
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ইনডেক্স', sel), F('শুরু (ঐচ্ছিক)', f0), F('শেষ (ঐচ্ছিক)', f1), btn, msg)));
+  }
+  root.append(h('div', {class: 'h2'}, 'লোড করা ডেটা'));
+  root.append(h('div', {class: 'kpis'},
+    [['স্পট রেঞ্জ', i.spot_from + ' → ' + i.spot_to], ['ট্রেডিং দিন', i.spot_days], ['এক্সপায়ারি', i.expiries.length], ['কন্ট্র্যাক্ট', i.contracts]]
+      .map(([k, v]) => h('div', {class: 'kpi'}, h('small', {}, k), h('b', {}, String(v))))));
+  const rows = i.expiries.map(e => '<tr><td>' + e.expiry + '</td><td>' + (e.lot || '–') + '</td><td>' + e.from + ' → ' + e.to + '</td><td>' + e.ce + '/' + e.pe + '</td></tr>').join('');
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {class: 'scroll', style: 'flex:1 1 100%', html: '<table><thead><tr><th>এক্সপায়ারি</th><th>লট</th><th>রেঞ্জ</th><th>CE/PE স্ট্রাইক</th></tr></thead><tbody>' + rows + '</tbody></table>'}))));
+  root.append(h('div', {class: 'h2'}, 'পরিকল্পিত (এখনো তৈরি হয়নি)'));
+  [['অটো ডেটা ডাউনলোডার', 'স্পট, ফিউচার, প্রিমিয়াম ও স্টকের ডেটা এক জায়গা থেকে আপডেট'],
+   ['স্টক স্ক্যানার', 'Nifty 50 থেকে স্টক বেছে স্ট্র্যাটেজি লাগানো; যেদিন যে স্টকে সেটআপ আগে রেডি হয়, সেখানে এন্ট্রি'],
+   ['লাইভ / পেপার সিগন্যাল', 'রোজকার সিগন্যাল ও পেপার ট্রেড ট্র্যাক']]
+    .forEach(([t, d]) => root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%'}, h('b', {}, t), h('span', {class: 'pill soon'}, 'শীঘ্রই')), h('div', {class: 'note', style: 'flex:1 1 100%'}, d)))));
+}
+
+/* ---------- ট্যাব ---------- */
+function showTab(t) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  for (const k of ['build', 'res', 'tune', 'pre', 'data']) $('#t-' + k).hidden = k !== t;
+  if (t === 'res') drawEq();
+  if (t === 'data') renderData();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('nav button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+$('#run').addEventListener('click', async () => {
+  const res = await runJob({kind: 'run', settings: S}, 'ব্যাকটেস্ট');
+  if (res) { LASTRUN = JSON.stringify(S); renderResults(res); showTab('res'); }
+});
+window.addEventListener('resize', () => { if (!$('#t-res').hidden) drawEq(); });
+
+(async function init() {
+  try {
+    META = await api('/api/meta');
+    const i = META.info; setBase(i.base || 5);
+    $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+    let saved = null; try { saved = JSON.parse(localStorage.getItem('ab_S2')); } catch (e) {}
+    S = fixSettings(saved || META.defaults);
+    if (S.general.tf % (i.base || 5)) S.general.tf = i.base || 5;
+    renderBuild(); renderPresets();
+  } catch (e) {
+    $('#dinfo').innerHTML = '<span class="pl" style="color:#ff8a8a">ত্রুটি: ' + e.message + '</span>';
+  }
+})();
+</script>
+</body>
+</html>
