@@ -11,7 +11,7 @@
 pkg install -y python git
 git clone https://github.com/BulletTeam/green-bull-algo-builder
 cd green-bull-algo-builder/backend
-pip install -r requirements.txt
+pip install -r requirements.txt   # starlette + uvicorn + requests (Rust লাগে না)
 mkdir -p ~/greenbull-data
 cp ~/storage/downloads/Algo/upstox_token.txt ~/greenbull-data/
 python downloader.py
