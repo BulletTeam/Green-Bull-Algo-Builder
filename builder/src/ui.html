@@ -245,7 +245,8 @@ function renderBuild() {
 
   root.append(dtl('gen', true, h('summary', {}, '① সাধারণ সেটিংস'),
     h('div', {class: 'body'},
-      F('সিগন্যাল কোন চার্টে?', selCtl('general.chart', [['spot', 'স্পট (BankNifty ইনডেক্স)'], ['prem', 'প্রিমিয়াম (অপশনের নিজের চার্ট)']], () => renderBuild())),
+      META.datasets ? F('ইনডেক্স (কোন ডেটায় ব্যাকটেস্ট)', h('select', {on: {change: async ev => { ev.target.disabled = true; const ok = await loadDS(ev.target.value); if (!ok) renderBuild(); }}}, ...META.datasets.map(d => h('option', {value: d.inst, selected: d.inst === META.info.inst}, d.name + (d.contracts ? '' : ' (অপশন নেই)'))))) : null,
+      F('সিগন্যাল কোন চার্টে?', selCtl('general.chart', [['spot', 'স্পট (' + INAME() + ' ইনডেক্স)'], ['prem', 'প্রিমিয়াম (অপশনের নিজের চার্ট)']], () => renderBuild())),
       F('চার্ট টাইমফ্রেম', selCtl('general.tf', CTFS, null, true)),
       F('লট সংখ্যা', numCtl('general.lots', 'লট সংখ্যা', 1)),
       F('মূলধন ₹ (DD% এর জন্য)', numCtl('general.capital', 'মূলধন', 1000, true)),
@@ -380,6 +381,25 @@ function caseCard(ci) {
 async function api(path, body) {
   const r = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : undefined);
   return r.json();
+}
+function INAME() { return (META && META.info && META.info.name) || 'BankNifty'; }
+function setHeader(i) {
+  $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+}
+async function loadDS(inst, from, to, status) {
+  const say = t => { if (status) status.textContent = t; };
+  say('লোড হচ্ছে… (১-২ মিনিট লাগতে পারে, অপেক্ষা করুন)');
+  try {
+    const r = await api('/api/load', {inst, from: from || '', to: to || ''});
+    if (r.error) throw new Error(r.error);
+    META = await api('/api/meta');
+    const ni = META.info; setBase(ni.base || 5); setHeader(ni);
+    if (S.general.tf % (ni.base || 5)) S.general.tf = (5 % (ni.base || 5) === 0) ? 5 : (ni.base || 5);
+    S.general.from = ''; S.general.to = '';
+    persist(); renderBuild(); if (!$('#t-data').hidden) renderData();
+    if (r.info && r.info.warn) alert(r.info.warn);
+    return true;
+  } catch (e) { say('ত্রুটি: ' + e.message); alert('ডেটা লোড হয়নি: ' + e.message); return false; }
 }
 let BUSY = false;
 let LASTRUN = null;
@@ -940,20 +960,7 @@ function renderData() {
     const f0 = h('input', {type: 'date', value: i.from || ''}), f1 = h('input', {type: 'date', value: i.to || ''});
     const msg = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'ইনডেক্স ও সময় বেছে "লোড করুন" চাপুন। তারিখ ফাঁকা রাখলে শেষ ~৬ মাস। সময় যত বেশি, মেমোরি ও লোড তত বেশি।');
     const btn = h('button', {class: 'btn s'}, '⬇ লোড করুন');
-    btn.addEventListener('click', async () => {
-      btn.disabled = true; msg.textContent = 'লোড হচ্ছে… (১-২ মিনিট লাগতে পারে, অপেক্ষা করুন)';
-      try {
-        const r = await api('/api/load', {inst: sel.value, from: f0.value, to: f1.value});
-        if (r.error) throw new Error(r.error);
-        META = await api('/api/meta');
-        const ni = META.info; setBase(ni.base || 5);
-        $('#dinfo').innerHTML = [(ni.name || ''), ni.spot_from + ' → ' + ni.spot_to, ni.spot_days + ' দিন', ni.expiries.length + ' এক্সপায়ারি', ni.contracts + ' কন্ট্র্যাক্ট', (ni.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
-        if (S.general.tf % (ni.base || 5)) S.general.tf = (5 % (ni.base || 5) === 0) ? 5 : (ni.base || 5);
-        S.general.from = ''; S.general.to = '';
-        persist(); renderBuild(); renderData();
-        if (r.info && r.info.warn) alert(r.info.warn);
-      } catch (e) { msg.textContent = 'ত্রুটি: ' + e.message; btn.disabled = false; }
-    });
+    btn.addEventListener('click', async () => { btn.disabled = true; const ok = await loadDS(sel.value, f0.value, f1.value, msg); if (!ok) btn.disabled = false; });
     root.append(h('div', {class: 'h2'}, 'ডেটাসেট বেছে নিন'));
     root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ইনডেক্স', sel), F('শুরু (ঐচ্ছিক)', f0), F('শেষ (ঐচ্ছিক)', f1), btn, msg)));
   }
@@ -989,7 +996,7 @@ window.addEventListener('resize', () => { if (!$('#t-res').hidden) drawEq(); });
   try {
     META = await api('/api/meta');
     const i = META.info; setBase(i.base || 5);
-    $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+    setHeader(i);
     let saved = null; try { saved = JSON.parse(localStorage.getItem('ab_S2')); } catch (e) {}
     S = fixSettings(saved || META.defaults);
     if (S.general.tf % (i.base || 5)) S.general.tf = i.base || 5;
