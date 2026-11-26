@@ -964,6 +964,7 @@ def prem_signals(D, st, exset):
 
 
 SRC_CACHE = {}
+ADV_CACHE = {}
 
 
 def backtest(D, raw, light=False, progress=None):
@@ -1459,6 +1460,10 @@ def run_sweep(D, base, params, progress=None):
 #  আংশিক বুকিং, খরচ, স্লিপেজ সহ)। বাছাই হয় শুধু TRAIN অংশে, TEST অংশ আলাদা রেখে যাচাই হয়।
 # =====================================================================
 
+def inr_(x):
+    return "₹{:,}".format(int(round(x)))
+
+
 def _canon(o):
     """৩.০ ও ৩ একই ধরতে: পূর্ণসংখ্যার মতো ফ্লোট → int (তুলনার চাবির জন্য)"""
     if isinstance(o, dict):
@@ -1472,6 +1477,124 @@ def _canon(o):
 
 def _ck(s):
     return json.dumps(_canon(s), sort_keys=True)
+
+
+_BN = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+
+
+def parse_request(text):
+    """ইউজারের লেখা অনুরোধ (বাংলা/English/Banglish) → লক্ষ্য ও শর্ত। কীওয়ার্ড-নিয়মভিত্তিক, কোনো LLM নয়।
+    ফেরত: dict(goal, cut, dd_cap_pct, dd_cap_abs, freeze, disable, sl_max, sl_min, strike_rule, keep_trades,
+              understood[], ignored[])"""
+    import re
+    R = {"goal": "balanced", "cut": None, "dd_cap_pct": None, "dd_cap_abs": None, "freeze": set(), "disable": set(),
+         "sl_max": None, "sl_min": None, "strike_rule": None, "keep_trades": None, "understood": [], "ignored": []}
+    raw = (text or "").translate(_BN).lower()
+    clauses = [c.strip() for c in re.split(r"[।\.\n;]+|\s+আর\s+|\s+and\s+|,", raw) if c.strip()]
+    P = {"sl": ["stop loss", "stoploss", " sl", "sl ", "এসএল", "স্টপ"], "tp": ["target", "টার্গেট", " tp", "ফাইনাল"],
+         "trail": ["trail", "ট্রেইল", "ট্রেল", "ট্রেলিং"], "be": ["breakeven", "break even", "ব্রেকইভেন", "ব্রেক ইভেন"],
+         "tg": ["t1", "t2", "tg", "partial", "আংশিক", "প্রফিট বুক"], "strike": ["strike", "স্ট্রাইক"],
+         "ts": ["time stop", "timestop", "টাইম স্টপ", "টাইম-স্টপ", "টাইমস্টপ"],
+         "window": ["entry time", "এন্ট্রি সময়", "এন্ট্রির সময়", "window", "উইন্ডো"],
+         "mt": ["max trade", "দিনে ট্রেড", "ডেইলি ট্রেড"]}
+    NAME = {"sl": "SL", "tp": "টার্গেট", "trail": "ট্রেইলিং", "be": "ব্রেকইভেন", "tg": "T1/T2", "strike": "স্ট্রাইক",
+            "ts": "টাইম-স্টপ", "window": "এন্ট্রি সময়", "mt": "দিনে ট্রেড-সংখ্যা"}
+    NEG = ["বদলিও না", "বদলাবি না", "বদলাবে না", "বদলাস না", "ছুঁস না", "ছুঁয়ো না", "ছুয়ো না", "বদল করো না", "বদল করিস না", "ফিক্সড",
+           "fixed", "যেমন আছে", "don't change", "dont change", "do not change", "unchanged", "keep as", "থাকুক", "লক"]
+    OFF = ["চাই না", "চাই-না", "লাগবে না", "লাগবেনা", "বাদ", "নেই", "বন্ধ", "off", "remove", "disable", "without", "ছাড়া"]
+    DDW = ["drawdown", "ড্রডাউন", "ড্র-ডাউন", "dd", "ঝুঁকি", "risk", "লস কম", "ক্ষতি কম"]
+    LESS = ["কম", "reduce", "lower", "less", "ছোট", "নামা", "কমা", "কমিয়ে", "decrease", "minimi"]
+    for c in clauses:
+        hit = False
+        num = re.findall(r"(\d+(?:\.\d+)?)\s*(%|শতাংশ|percent|টাকা|rs|₹)?", c)
+        nums = [(float(a), b) for a, b in num]
+        # --- ট্রেড সংখ্যা কমিও না ---
+        if ("ট্রেড" in c or "trade" in c) and any(k in c for k in ["কমিও না", "কমাস না", "কমাবি না", "কমাবে না", "কম করো না", "কম করিস না", "don't reduce", "not reduce", "same number"]):
+            R["keep_trades"] = 0.9
+            R["understood"].append("ট্রেড সংখ্যা প্রায় একই রাখা (অন্তত ৯০%)")
+            continue
+        # --- লক্ষ্য ---
+        if any(k in c for k in DDW) and any(k in c for k in LESS + ["মধ্যে", "within", "under", "limit", "সীমা", "max", "বেশি না", "নিচে"]):
+            R["goal"] = "dd"
+            capw = any(k in c for k in ["মধ্যে", "within", "under", "limit", "সীমা", "max", "বেশি না", "নিচে", "এর বেশি", "cap"])
+            if nums:
+                v, u = nums[0]
+                if u in ("টাকা", "rs", "₹") or v > 100:
+                    R["dd_cap_abs"] = v
+                    R["understood"].append("ড্রডাউন ₹%d-এর মধ্যে রাখার চেষ্টা" % v)
+                elif capw:
+                    R["dd_cap_pct"] = v
+                    R["understood"].append("ড্রডাউন মূলধনের %g%%-এর মধ্যে রাখার চেষ্টা" % v)
+                else:
+                    R["cut"] = min(v, 90.0)
+                    R["understood"].append("ড্রডাউন প্রায় %g%% কমানো" % R["cut"])
+            else:
+                R["cut"] = 15.0 if any(k in c for k in ["একটু", "slightly", "little", "bit"]) else 40.0 if any(k in c for k in ["অনেক", "much", "significant", "বেশ"]) else 25.0
+                R["understood"].append("ড্রডাউন কমানো (প্রায় %g%%, আপনি সংখ্যা দেননি)" % R["cut"])
+            hit = True
+        elif any(k in c for k in ["win rate", "winrate", "উইন রেট", "জেতার হার", "win%", "win %", "উইনরেট", "জেতা ট্রেড"]):
+            R["goal"] = "win"; R["understood"].append("Win% বাড়ানো (প্রফিট-ফ্যাক্টর ১-এর ওপরে রেখে)"); hit = True
+        elif any(k in c for k in ["profit factor", "প্রফিট ফ্যাক্টর", " pf", "pf "]):
+            R["goal"] = "pf"; R["understood"].append("Profit Factor বাড়ানো"); hit = True
+        elif any(k in c for k in ["লাভ বাড়", "profit বাড়", "বেশি লাভ", "more profit", "increase profit", "maximize", "মুনাফা", "net বাড়", "রিটার্ন বাড়", "return", "বেশি আয়"]):
+            R["goal"] = "profit"; R["understood"].append("নেট লাভ বাড়ানো (ড্রডাউন বর্তমানের ~১.৩ গুণের মধ্যে রেখে)"); hit = True
+        # --- SL সীমা ---
+        if any(k in c for k in P["sl"]) and nums and not any(k in c for k in P["tp"]):
+            v = nums[0][0]
+            if any(k in c for k in ["বেশি না", "বেশি হবে না", "এর নিচে", "max", "maximum", "সর্বোচ্চ", "মধ্যে", "within", "under", "above না"]):
+                R["sl_max"] = v; R["understood"].append("SL ≤ %g%%" % v); hit = True
+            elif any(k in c for k in ["কম না", "কম হবে না", "min", "minimum", "অন্তত", "কমপক্ষে", "at least"]):
+                R["sl_min"] = v; R["understood"].append("SL ≥ %g%%" % v); hit = True
+        # --- স্ট্রাইক নিয়ম ---
+        if any(k in c for k in P["strike"]) or "itm" in c or "otm" in c or "atm" in c:
+            if "itm" in c and any(k in c for k in OFF):
+                R["strike_rule"] = "no_itm"; R["understood"].append("ITM স্ট্রাইক বাদ"); hit = True
+            elif "otm" in c and any(k in c for k in OFF):
+                R["strike_rule"] = "no_otm"; R["understood"].append("OTM স্ট্রাইক বাদ"); hit = True
+            elif ("atm" in c and any(k in c for k in ["only", "শুধু", "ই রাখ", "fixed", "ফিক্সড"])):
+                R["strike_rule"] = "atm"; R["understood"].append("স্ট্রাইক শুধু ATM"); hit = True
+        # --- বদলিও না / চাই না (প্যারামিটার ধরে) ---
+        for k, words in P.items():
+            if any(w in c for w in words):
+                if any(n in c for n in NEG) and k not in R["freeze"]:
+                    R["freeze"].add(k); R["understood"].append("%s যেমন আছে তেমনই থাকবে" % NAME[k]); hit = True
+                elif any(o in c for o in OFF) and k in ("trail", "tp", "be", "tg", "ts"):
+                    R["disable"].add(k); R["freeze"].add(k); R["understood"].append("%s ব্যবহার হবে না" % NAME[k]); hit = True
+        if not hit:
+            R["ignored"].append(c)
+    return R
+
+
+def _goal_score(R, a, cap, min_n, base_dd, base_win):
+    """লক্ষ্য অনুযায়ী স্কোর। ড্রডাউন লক্ষ্য/সীমা থাকলে সীমা ছাড়ালে শাস্তি।"""
+    if a["n"] < min_n:
+        return None
+    dd = abs(a["dd"])
+    net = a["net"]
+    g = R["goal"]
+    if g == "dd":
+        sc = net / (dd * 3.0 + 0.02 * cap)
+    elif g == "profit":
+        sc = net / (dd * 0.5 + 0.02 * cap)
+    elif g == "win":
+        sc = (net / (dd + 0.02 * cap)) * (a["win"] / 50.0) if a["pf"] >= 1 else (net / (dd + 0.02 * cap)) - 1
+    elif g == "pf":
+        sc = (a["pf"] - 1.0) * math.sqrt(a["n"]) / 10.0
+    else:
+        sc = net / (dd + 0.02 * cap)
+    lim = None
+    if R.get("dd_cap_abs"):
+        lim = R["dd_cap_abs"]
+    elif R.get("dd_cap_pct"):
+        lim = cap * R["dd_cap_pct"] / 100.0
+    elif g == "dd" and R.get("cut") and base_dd:
+        lim = base_dd * (1 - R["cut"] / 100.0)
+    elif g == "profit" and base_dd:
+        lim = base_dd * 1.3
+    if lim and dd > lim:
+        f = (lim / dd) ** 2
+        sc = sc * f if sc > 0 else sc / f
+    return float(sc)
 
 
 def _tr(a):
@@ -1562,7 +1685,17 @@ def advise(D, raw, opts, progress=None):
         G["split"] = 70
     max_runs = 70 if quick else 170
     est = 38 if quick else 110
-    cache, runs = {}, [0]
+    runs = [0]
+    R = parse_request((opts or {}).get("req", ""))
+    _chk = (opts or {}).get("last") or (opts or {}).get("req", "")
+    if _chk.strip() and not parse_request(_chk)["understood"]:
+        raise ValueError("অনুরোধটা বুঝতে পারিনি: \"%s\"। যেমন লিখতে পারেন: \"ড্রডাউন ৩০%% কমাও\", \"লাভ বাড়াও\", \"win rate বাড়াও, SL ২৫%% এর বেশি না\", \"ট্রেইল চাই না\", \"স্ট্রাইক বদলিও না\", \"ITM চাই না\", \"ড্রডাউন ১০%% এর মধ্যে রাখো\"।" % _chk.strip()[:80])
+    if ADV_CACHE.get("D") is not D:
+        ADV_CACHE.clear()
+        ADV_CACHE["D"] = D
+    cache = ADV_CACHE.setdefault("c", {})
+    if len(cache) > 3000:
+        cache.clear()
 
     def ev(s):
         k = _ck(s)
@@ -1576,10 +1709,45 @@ def advise(D, raw, opts, progress=None):
     b_st = ev(base)
     if b_st["train"]["n"] < 10:
         raise ValueError("TRAIN অংশে ট্রেড মাত্র %d টি — অ্যাডভাইজারের জন্য অন্তত ১০০+ ট্রেড দরকার। তারিখ-সীমা বাড়ান বা এন্ট্রি শিথিল করুন।" % b_st["train"]["n"])
-    min_n = max(15, int(0.5 * b_st["train"]["n"]))
+    min_n = max(15, int((R["keep_trades"] or 0.5) * b_st["train"]["n"]))
     meta0 = cache[_ck(base)]["meta"]
+    bdd, bwin = abs(b_st["train"]["dd"]), b_st["train"]["win"]
+    scoref = lambda a, mn: _goal_score(R, a, cap, mn, bdd, bwin)
     cur = copy.deepcopy(base)
     changes, stages = [], []
+    fz = set(R["freeze"])
+    ALIAS = {"t1": "tg", "t2": "tg", "a1": "tg", "wf": "window", "wt": "window"}
+
+    # অনুরোধে "চাই না" বলা প্যারামিটার আগে বন্ধ করা (পরিবর্তন হিসেবে দেখানো হবে)
+    def force(key, label, muts, frm, to):
+        nonlocal cur
+        before = ev(cur)
+        nxt = copy.deepcopy(cur)
+        for pth, v in muts:
+            set_path(nxt, pth, v)
+        if _ck(nxt) == _ck(cur):
+            return
+        after = ev(nxt)
+        changes.append({"key": key, "label": label, "from": frm, "to": to, "muts": muts,
+                        "d_train": float(after["train"]["net"] - before["train"]["net"]),
+                        "d_test": float(after["test"]["net"] - before["test"]["net"]), "plateau": "আপনার অনুরোধে",
+                        "dd_from": float(before["train"]["dd"]), "dd_to": float(after["train"]["dd"])})
+        cur = nxt
+    cpf = "cases.%d." % ci
+    c0 = base["cases"][ci]
+    if "trail" in R["disable"] and c0["trail"]["mode"] != "none":
+        force("trail", "ট্রেইলিং SL", [(cpf + "trail.mode", "none")], c0["trail"]["mode"], "বন্ধ")
+    if "tp" in R["disable"] and c0["tp"]["mode"] != "none":
+        force("tp", "ফাইনাল টার্গেট", [(cpf + "tp.mode", "none")], "%s %s" % (c0["tp"]["mode"], c0["tp"]["val"]), "নেই")
+    if "be" in R["disable"] and c0["be"]["on"]:
+        force("be", "ব্রেকইভেন", [(cpf + "be.on", False)], "চালু", "বন্ধ")
+    if "tg" in R["disable"] and c0["tg"]["on"]:
+        force("tg", "T1/T2 বুকিং", [(cpf + "tg.on", False)], "চালু", "বন্ধ")
+    if "ts" in R["disable"] and c0.get("time_stop"):
+        force("ts", "টাইম-স্টপ", [(cpf + "time_stop", 0)], str(c0.get("time_stop")), "বন্ধ")
+    if R["strike_rule"] == "atm" and c0["strike"]["mode"] == "offset":
+        force("strike", "স্ট্রাইক", [(cpf + "strike.off", 0)], "%+d" % int(float(c0["strike"]["off"])), "ATM")
+        fz.add("strike")
 
     def get(path, s=None):
         o = s if s is not None else cur
@@ -1594,6 +1762,8 @@ def advise(D, raw, opts, progress=None):
         rows, ckey = [], _ck(basis)
         if runs[0] >= max_runs:
             return None
+        if ALIAS.get(key, key) in fz:
+            return basis if state is not None else None
         seen = set()
         for disp, muts, ordd in cands:
             s = copy.deepcopy(basis)
@@ -1608,8 +1778,8 @@ def advise(D, raw, opts, progress=None):
         if not any(r["cur"] for r in rows):
             rows.insert(0, {"v": "বর্তমান", "ord": False, "cur": True, "muts": [], "st": ev(basis)})
         for r in rows:
-            r["sc"] = _score(r["st"]["train"], cap, min_n)
-            r["sc_te"] = _score(r["st"]["test"], cap, 3) if r["st"]["test"]["n"] else None
+            r["sc"] = scoref(r["st"]["train"], min_n)
+            r["sc_te"] = scoref(r["st"]["test"], 3) if r["st"]["test"]["n"] else None
         ords = [r for r in rows if r["ord"]]
         sm = _smooth([r["sc"] for r in ords])
         for r, v in zip(ords, sm):
@@ -1655,6 +1825,10 @@ def advise(D, raw, opts, progress=None):
     # ---- স্ট্রাইক ----
     if mode_s == "offset":
         rng_ = (-2, -1, 0, 1, 2) if quick else (-3, -2, -1, 0, 1, 2, 3)
+        if R["strike_rule"] == "no_itm":
+            rng_ = tuple(v for v in rng_ if v >= 0)
+        elif R["strike_rule"] == "no_otm":
+            rng_ = tuple(v for v in rng_ if v <= 0)
         run_stage("strike", "স্ট্রাইক (ATM থেকে ধাপ; − = ITM, + = OTM)",
                   [("%+d" % v if v else "ATM", [(cp + "strike.off", v)], True) for v in rng_])
     else:
@@ -1663,8 +1837,13 @@ def advise(D, raw, opts, progress=None):
 
     def sl_stage():
         vals = (10, 15, 20, 25, 30, 40) if quick else (8, 10, 12, 15, 18, 20, 25, 30, 35, 40, 50)
+        if R["sl_max"]:
+            vals = tuple(v for v in vals if v <= R["sl_max"])
+        if R["sl_min"]:
+            vals = tuple(v for v in vals if v >= R["sl_min"])
         c = [("%d%%" % v, [(cp + "sl.mode", "pct"), (cp + "sl.val", float(v))], True) for v in vals]
-        c.append(("SL নেই", [(cp + "sl.mode", "none")], False))
+        if not (R["sl_max"] or R["sl_min"]):
+            c.append(("SL নেই", [(cp + "sl.mode", "none")], False))
         run_stage("sl", "স্টপ লস (এন্ট্রি প্রিমিয়ামের %)", c)
 
     def tp_stage():
@@ -1701,7 +1880,7 @@ def advise(D, raw, opts, progress=None):
 
     # ---- আংশিক বুকিং T1/T2 ----
     tg_block = None
-    if not quick:
+    if not quick and "tg" not in fz:
         L0 = cur["general"]["lots"]
         lots_eff = L0 if L0 >= 2 else 4
         st_t = copy.deepcopy(cur)
@@ -1787,8 +1966,8 @@ def advise(D, raw, opts, progress=None):
     f_tr, f_te, f_all = fin["train"], fin["test"], fin["all"]
     b_tr, b_te, b_all = b_st["train"], b_st["test"], b_st["all"]
     msgs, level = [], "pass"
-    sb_tr, sf_tr = _score(b_tr, cap, 1), _score(f_tr, cap, 1)
-    sb_te, sf_te = _score(b_te, cap, 1), _score(f_te, cap, 1)
+    sb_tr, sf_tr = scoref(b_tr, 1), scoref(f_tr, 1)
+    sb_te, sf_te = scoref(b_te, 1), scoref(f_te, 1)
     if not changes:
         level = "keep"
         msgs.append("বর্তমান সেটিং ইতিমধ্যেই এই ডেটায় প্রায় সেরা — বদলানোর মতো স্পষ্ট উন্নতি পাওয়া যায়নি।")
@@ -1802,7 +1981,7 @@ def advise(D, raw, opts, progress=None):
         elif sb_te is not None and sf_te is not None and sb_te > 0 and sf_te < 0.8 * sb_te:
             level = "fail"
             msgs.append("TEST-এ সাজেশন বর্তমানের চেয়ে খারাপ (স্কোর %.2f বনাম %.2f) — ওভারফিট সম্ভাবনা।" % (sf_te, sb_te))
-        elif f_te["net"] < b_te["net"]:
+        elif f_te["net"] < b_te["net"] and R["goal"] in ("balanced", "profit"):
             level = "warn"
             msgs.append("TEST-এ নেট কিছুটা কমেছে (%s → %s ₹) কিন্তু ড্রডাউন/স্কোর মিলিয়ে দেখুন।" % (round(b_te["net"]), round(f_te["net"])))
         else:
@@ -1817,6 +1996,35 @@ def advise(D, raw, opts, progress=None):
             level = "warn" if level == "pass" else level
             msgs.append("কিছু সাজেশন 'স্পাইক' — আশপাশের মান খারাপ, তাই ওই মান ভাগ্যের ফল হতে পারে।")
 
+    # ---- অনুরোধ অনুযায়ী ফলাফলের রিপোর্ট (সৎভাবে: লক্ষ্য পূরণ হলো কি না) ----
+    def pc(a, b):
+        return (100.0 * (a - b) / abs(b)) if b else 0.0
+    goal_rep = None
+    if R["goal"] != "balanced" or R["understood"]:
+        d_tr = pc(abs(f_tr["dd"]), abs(b_tr["dd"]))
+        d_te = pc(abs(f_te["dd"]), abs(b_te["dd"])) if b_te["n"] and f_te["n"] else None
+        goal_rep = {"goal": R["goal"], "dd_change_train": d_tr, "dd_change_test": d_te,
+                    "net_change_train": pc(f_tr["net"], b_tr["net"]),
+                    "net_change_test": pc(f_te["net"], b_te["net"]) if b_te["n"] else None,
+                    "win_from": b_all["win"], "win_to": f_all["win"], "pf_from": b_all["pf"], "pf_to": f_all["pf"],
+                    "trades_from": b_all["n"], "trades_to": f_all["n"]}
+        if R["goal"] == "dd":
+            tgt = None
+            if R.get("dd_cap_abs"):
+                tgt = R["dd_cap_abs"]
+            elif R.get("dd_cap_pct"):
+                tgt = cap * R["dd_cap_pct"] / 100.0
+            elif R.get("cut"):
+                tgt = abs(b_tr["dd"]) * (1 - R["cut"] / 100.0)
+            if tgt is not None:
+                ok_ = abs(f_tr["dd"]) <= tgt * 1.001
+                goal_rep["target"] = float(tgt)
+                goal_rep["target_met"] = bool(ok_)
+                msgs.append(("✓ ড্রডাউন লক্ষ্য (%s) পূরণ হয়েছে (TRAIN: %s)।" if ok_ else
+                             "✗ ড্রডাউন লক্ষ্য (%s) পূরণ করা গেল না — এই স্ট্র্যাটেজি ও পরীক্ষিত মানের মধ্যে সবচেয়ে কাছেরটা দেওয়া হলো (TRAIN: %s)।") % (inr_(tgt), inr_(abs(f_tr["dd"]))))
+            if d_te is not None and d_te > 0:
+                level = "warn" if level in ("pass", "keep") else level
+                msgs.append("TEST অংশে ড্রডাউন কমেনি, বরং %.0f%% বেড়েছে — কমানোটা শুধু TRAIN-এ কাজ করেছে।" % d_te)
     res_fin = backtest(D, cur, light=False)
     res_base = backtest(D, base, light=False)
     tf_, tb_ = res_fin["trades"], res_base["trades"]
@@ -1843,6 +2051,9 @@ def advise(D, raw, opts, progress=None):
             "base": {"train": _tr(b_tr), "test": _tr(b_te), "all": _tr(b_all)},
             "final": {"train": _tr(f_tr), "test": _tr(f_te), "all": _tr(f_all)},
             "changes": changes, "stages": stages, "tg": tg_block,
+            "req": {"text": (opts or {}).get("req", ""), "goal": R["goal"], "understood": R["understood"],
+                    "ignored": R["ignored"]},
+            "goal_rep": goal_rep,
             "validation": {"level": level, "msgs": msgs},
             "mc": {"final": mc_f, "base": mc_b},
             "diag": {"buckets": _bucket_diag(tf_), "reach": reach,
@@ -3311,7 +3522,7 @@ function renderData() {
 
 
 /* ---------- 🧠 AI Advisor ---------- */
-let AIR = null, AIOPT = {mode: 'full', case: 0};
+let AIR = null, AIOPT = {mode: 'full', case: 0, reqs: []};
 function renderAI() {
   const root = $('#t-ai'); root.innerHTML = '';
   root.append(h('div', {class: 'h2'}, '🧠 AI Advisor'));
@@ -3324,11 +3535,47 @@ function renderAI() {
   ms.value = AIOPT.mode; ms.addEventListener('change', () => AIOPT.mode = ms.value);
   root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('কোন Case', cs), F('মোড', ms),
     h('button', {class: 'btn g', style: 'align-self:flex-end', on: {click: async () => {
-      const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case}}, 'AI বিশ্লেষণ');
+      const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case, req: AIOPT.reqs.map(x => x.text).join('\n')}}, 'AI বিশ্লেষণ');
       if (r) { AIR = r; renderAI(); }
     }}}, '🧠 বিশ্লেষণ চালান'),
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'সময় লাগে: প্রায় ৪০–১৭০টি পূর্ণ ব্যাকটেস্ট। ফোনে কয়েক মিনিট হতে পারে; ডেটা বেশি হলে আগে Data ট্যাবে তারিখ-সীমা ছোট করুন।'))));
+  /* ---- অনুরোধ বাক্স ---- */
+  const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
+  const send = async txt => {
+    txt = (txt || '').trim(); if (!txt) return;
+    AIOPT.reqs.push({text: txt});
+    const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case, last: txt, req: AIOPT.reqs.map(x => x.text).join('\n')}}, 'AI অনুরোধ');
+    if (!r) { AIOPT.reqs.pop(); return; }
+    const g = r.goal_rep || {};
+    AIOPT.reqs[AIOPT.reqs.length - 1].sum = {dd: g.dd_change_train, ddt: g.dd_change_test, net: g.net_change_train, nett: g.net_change_test, ok: g.target_met};
+    AIR = r; renderAI();
+  };
+  const chips = ['ড্রডাউন একটু কমাও', 'ড্রডাউন ৩০% কমাও', 'লাভ বাড়াও', 'win rate বাড়াও', 'ট্রেইল চাই না', 'স্ট্রাইক বদলিও না', 'ITM চাই না', 'ট্রেড সংখ্যা কমিও না'].map(c => h('button', {class: 'btn s', style: 'padding:4px 9px;font-size:11.5px', on: {click: () => { ta.value = (ta.value ? ta.value + ', ' : '') + c; }}}, c));
+  root.append(h('div', {class: 'h2'}, '💬 অ্যাডভাইজারকে বলুন'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, ta, h('div', {style: 'display:flex;flex-wrap:wrap;gap:5px;flex:1 1 100%'}, chips),
+    h('button', {class: 'btn g', on: {click: () => { const t = ta.value; ta.value = ''; send(t); }}}, '➤ পাঠান ও সাজেশন আপডেট নিন'),
+    AIOPT.reqs.length ? h('button', {class: 'btn s', on: {click: () => { AIOPT.reqs = []; AIR = null; renderAI(); }}}, '✕ সব অনুরোধ মুছুন') : null,
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'আপনার লেখা কীওয়ার্ড-নিয়ম দিয়ে বোঝা হয় (বাংলা/English), তারপর আসল ব্যাকটেস্ট আবার চালিয়ে লক্ষ্য অনুযায়ী সাজেশন বদলায় — এটা ChatGPT-ধাঁচের স্বাধীন AI নয়, তাই সহজ ছোট বাক্যে লিখুন। অনুরোধগুলো জমা হয়ে একসাথে কাজ করে; একবারে একাধিক লেখা যায় (কমা দিয়ে)। যা বুঝিনি তা নিচে দেখাবে।'))));
+  if (AIOPT.reqs.length) {
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%', html: AIOPT.reqs.map((q, i) => '<div style="margin:3px 0">🗣 <b>' + (i + 1) + '.</b> ' + q.text.replace(/</g, '&lt;') + (q.sum ? ' <span class="pill">TRAIN DD ' + (q.sum.dd > 0 ? '+' : '') + (q.sum.dd || 0).toFixed(0) + '%' + (q.sum.ddt != null ? ' | TEST DD ' + (q.sum.ddt > 0 ? '+' : '') + q.sum.ddt.toFixed(0) + '%' : '') + '</span>' : '') + '</div>').join('')}))));
+  }
   const A = AIR; if (!A) return;
+  if (A.req && (A.req.understood.length || A.req.ignored.length)) {
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {class: 'note', style: 'flex:1 1 100%;margin:0', html:
+      (A.req.understood.length ? '<b>আমি যা বুঝেছি:</b><br>' + A.req.understood.map(x => '✓ ' + x).join('<br>') : '') +
+      (A.req.ignored.length ? '<br><b style="color:#f5c542">যা বুঝিনি (বাদ দিয়েছি):</b><br>' + A.req.ignored.map(x => '? ' + x.replace(/</g, '&lt;')).join('<br>') : '')}))));
+  }
+  const GR = A.goal_rep;
+  if (GR) {
+    const sg = v => v == null ? '–' : (v > 0 ? '+' : '') + v.toFixed(0) + '%';
+    const cdd = v => v == null ? '–' : '<span class="' + (v <= 0 ? 'pos' : 'neg') + '">' + sg(v) + '</span>';
+    const cnt = v => v == null ? '–' : '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + sg(v) + '</span>';
+    root.append(h('h3', {}, 'আপনার অনুরোধের ফল (এখনকার সেটিংসের তুলনায়)'));
+    root.append(tbl(['', 'TRAIN', 'TEST (যাচাই)'], [
+      ['ড্রডাউন বদল (− মানে কমেছে, ভালো)', cdd(GR.dd_change_train), cdd(GR.dd_change_test)],
+      ['নেট লাভ বদল', cnt(GR.net_change_train), cnt(GR.net_change_test)]]));
+    root.append(h('div', {class: 'note'}, 'Win%: ' + GR.win_from.toFixed(0) + '% → ' + GR.win_to.toFixed(0) + '% | PF: ' + f2(GR.pf_from) + ' → ' + f2(GR.pf_to) + ' | ট্রেড: ' + GR.trades_from + ' → ' + GR.trades_to + (GR.target != null ? ' | লক্ষ্য ড্রডাউন ' + inr(GR.target) + (GR.target_met ? ' ✓ পূরণ' : ' ✗ পূরণ হয়নি') : '')));
+  }
   const V = A.validation, col = {pass: '#26c281', keep: '#8fb7ff', warn: '#f5c542', fail: '#ff5d5d'}[V.level] || '#8b96a8';
   const ttl = {pass: '✅ সাজেশন যাচাইয়ে টিকেছে', keep: 'ℹ️ বর্তমান সেটিং-ই ভালো', warn: '⚠️ সতর্কতাসহ সাজেশন', fail: '❌ যাচাইয়ে টেকেনি'}[V.level];
   root.append(h('div', {class: 'card', style: 'border-color:' + col}, h('div', {class: 'body'},

@@ -1009,7 +1009,7 @@ function renderData() {
 
 
 /* ---------- 🧠 AI Advisor ---------- */
-let AIR = null, AIOPT = {mode: 'full', case: 0};
+let AIR = null, AIOPT = {mode: 'full', case: 0, reqs: []};
 function renderAI() {
   const root = $('#t-ai'); root.innerHTML = '';
   root.append(h('div', {class: 'h2'}, '🧠 AI Advisor'));
@@ -1022,11 +1022,47 @@ function renderAI() {
   ms.value = AIOPT.mode; ms.addEventListener('change', () => AIOPT.mode = ms.value);
   root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('কোন Case', cs), F('মোড', ms),
     h('button', {class: 'btn g', style: 'align-self:flex-end', on: {click: async () => {
-      const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case}}, 'AI বিশ্লেষণ');
+      const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case, req: AIOPT.reqs.map(x => x.text).join('\n')}}, 'AI বিশ্লেষণ');
       if (r) { AIR = r; renderAI(); }
     }}}, '🧠 বিশ্লেষণ চালান'),
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'সময় লাগে: প্রায় ৪০–১৭০টি পূর্ণ ব্যাকটেস্ট। ফোনে কয়েক মিনিট হতে পারে; ডেটা বেশি হলে আগে Data ট্যাবে তারিখ-সীমা ছোট করুন।'))));
+  /* ---- অনুরোধ বাক্স ---- */
+  const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
+  const send = async txt => {
+    txt = (txt || '').trim(); if (!txt) return;
+    AIOPT.reqs.push({text: txt});
+    const r = await runJob({kind: 'advise', settings: S, opts: {mode: AIOPT.mode, case: AIOPT.case, last: txt, req: AIOPT.reqs.map(x => x.text).join('\n')}}, 'AI অনুরোধ');
+    if (!r) { AIOPT.reqs.pop(); return; }
+    const g = r.goal_rep || {};
+    AIOPT.reqs[AIOPT.reqs.length - 1].sum = {dd: g.dd_change_train, ddt: g.dd_change_test, net: g.net_change_train, nett: g.net_change_test, ok: g.target_met};
+    AIR = r; renderAI();
+  };
+  const chips = ['ড্রডাউন একটু কমাও', 'ড্রডাউন ৩০% কমাও', 'লাভ বাড়াও', 'win rate বাড়াও', 'ট্রেইল চাই না', 'স্ট্রাইক বদলিও না', 'ITM চাই না', 'ট্রেড সংখ্যা কমিও না'].map(c => h('button', {class: 'btn s', style: 'padding:4px 9px;font-size:11.5px', on: {click: () => { ta.value = (ta.value ? ta.value + ', ' : '') + c; }}}, c));
+  root.append(h('div', {class: 'h2'}, '💬 অ্যাডভাইজারকে বলুন'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, ta, h('div', {style: 'display:flex;flex-wrap:wrap;gap:5px;flex:1 1 100%'}, chips),
+    h('button', {class: 'btn g', on: {click: () => { const t = ta.value; ta.value = ''; send(t); }}}, '➤ পাঠান ও সাজেশন আপডেট নিন'),
+    AIOPT.reqs.length ? h('button', {class: 'btn s', on: {click: () => { AIOPT.reqs = []; AIR = null; renderAI(); }}}, '✕ সব অনুরোধ মুছুন') : null,
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'আপনার লেখা কীওয়ার্ড-নিয়ম দিয়ে বোঝা হয় (বাংলা/English), তারপর আসল ব্যাকটেস্ট আবার চালিয়ে লক্ষ্য অনুযায়ী সাজেশন বদলায় — এটা ChatGPT-ধাঁচের স্বাধীন AI নয়, তাই সহজ ছোট বাক্যে লিখুন। অনুরোধগুলো জমা হয়ে একসাথে কাজ করে; একবারে একাধিক লেখা যায় (কমা দিয়ে)। যা বুঝিনি তা নিচে দেখাবে।'))));
+  if (AIOPT.reqs.length) {
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%', html: AIOPT.reqs.map((q, i) => '<div style="margin:3px 0">🗣 <b>' + (i + 1) + '.</b> ' + q.text.replace(/</g, '&lt;') + (q.sum ? ' <span class="pill">TRAIN DD ' + (q.sum.dd > 0 ? '+' : '') + (q.sum.dd || 0).toFixed(0) + '%' + (q.sum.ddt != null ? ' | TEST DD ' + (q.sum.ddt > 0 ? '+' : '') + q.sum.ddt.toFixed(0) + '%' : '') + '</span>' : '') + '</div>').join('')}))));
+  }
   const A = AIR; if (!A) return;
+  if (A.req && (A.req.understood.length || A.req.ignored.length)) {
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {class: 'note', style: 'flex:1 1 100%;margin:0', html:
+      (A.req.understood.length ? '<b>আমি যা বুঝেছি:</b><br>' + A.req.understood.map(x => '✓ ' + x).join('<br>') : '') +
+      (A.req.ignored.length ? '<br><b style="color:#f5c542">যা বুঝিনি (বাদ দিয়েছি):</b><br>' + A.req.ignored.map(x => '? ' + x.replace(/</g, '&lt;')).join('<br>') : '')}))));
+  }
+  const GR = A.goal_rep;
+  if (GR) {
+    const sg = v => v == null ? '–' : (v > 0 ? '+' : '') + v.toFixed(0) + '%';
+    const cdd = v => v == null ? '–' : '<span class="' + (v <= 0 ? 'pos' : 'neg') + '">' + sg(v) + '</span>';
+    const cnt = v => v == null ? '–' : '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + sg(v) + '</span>';
+    root.append(h('h3', {}, 'আপনার অনুরোধের ফল (এখনকার সেটিংসের তুলনায়)'));
+    root.append(tbl(['', 'TRAIN', 'TEST (যাচাই)'], [
+      ['ড্রডাউন বদল (− মানে কমেছে, ভালো)', cdd(GR.dd_change_train), cdd(GR.dd_change_test)],
+      ['নেট লাভ বদল', cnt(GR.net_change_train), cnt(GR.net_change_test)]]));
+    root.append(h('div', {class: 'note'}, 'Win%: ' + GR.win_from.toFixed(0) + '% → ' + GR.win_to.toFixed(0) + '% | PF: ' + f2(GR.pf_from) + ' → ' + f2(GR.pf_to) + ' | ট্রেড: ' + GR.trades_from + ' → ' + GR.trades_to + (GR.target != null ? ' | লক্ষ্য ড্রডাউন ' + inr(GR.target) + (GR.target_met ? ' ✓ পূরণ' : ' ✗ পূরণ হয়নি') : '')));
+  }
   const V = A.validation, col = {pass: '#26c281', keep: '#8fb7ff', warn: '#f5c542', fail: '#ff5d5d'}[V.level] || '#8b96a8';
   const ttl = {pass: '✅ সাজেশন যাচাইয়ে টিকেছে', keep: 'ℹ️ বর্তমান সেটিং-ই ভালো', warn: '⚠️ সতর্কতাসহ সাজেশন', fail: '❌ যাচাইয়ে টেকেনি'}[V.level];
   root.append(h('div', {class: 'card', style: 'border-color:' + col}, h('div', {class: 'body'},
