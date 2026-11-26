@@ -384,7 +384,7 @@ async function api(path, body) {
 }
 function INAME() { return (META && META.info && META.info.name) || 'BankNifty'; }
 function setHeader(i) {
-  $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].map(x => '<span class="pl">' + x + '</span>').join('');
+  $('#dinfo').innerHTML = [(i.name || 'BankNifty'), i.spot_from + ' → ' + i.spot_to, i.spot_days + ' দিন', i.expiries.length + ' এক্সপায়ারি', i.contracts + ' কন্ট্র্যাক্ট', (i.base || 5) + ' মিনিট'].concat(i.vol_days == null ? [] : [i.vol_days > 0 ? 'ভলিউম ✓ ' + i.vol_days + ' দিন' : 'ভলিউম ✗']).map(x => '<span class="pl">' + x + '</span>').join('');
 }
 async function loadDS(inst, from, to, status) {
   const say = t => { if (status) status.textContent = t; };
@@ -862,6 +862,22 @@ function rangeVals(from, to, step) {
 }
 function renderTune() {
   const root = $('#t-tune'); root.innerHTML = '';
+  if (META.datasets && META.info.mode === 'db') {
+    const ds = META.datasets.filter(d => d.contracts > 0);
+    const boxes = ds.map(d => { const c = h('input', {type: 'checkbox', value: d.inst}); c.checked = true; return [c, h('label', {style: 'display:flex;gap:6px;align-items:center;margin-right:12px'}, c, d.name)]; });
+    const res = h('div', {id: 'multiRes'});
+    const btn = h('button', {class: 'btn g'}, '🌐 সব ইনডেক্সে চালান');
+    btn.addEventListener('click', async () => {
+      const insts = boxes.filter(([c]) => c.checked).map(([c]) => c.value);
+      if (!insts.length) { alert('অন্তত একটা ইনডেক্স বাছুন'); return; }
+      const r = await runJob({kind: 'multi', settings: S, insts, from: S.general.from, to: S.general.to}, 'মাল্টি-ইনডেক্স');
+      if (r) renderMulti(res, r);
+    });
+    root.append(h('div', {class: 'h2'}, 'একই স্ট্র্যাটেজি, সব ইনডেক্সে'));
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'display:flex;flex-wrap:wrap;flex:1 1 100%'}, boxes.map(b => b[1])), btn,
+      h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'প্রতিটি ইনডেক্সের ডেটা পালা করে লোড হয়ে ব্যাকটেস্ট চলে, তাই সময় লাগে। সেটিংস ট্যাবের বর্তমান সেটিংসই ব্যবহার হয়। অপশন ডেটা নেই এমন ইনডেক্স তালিকায় আসে না।'))));
+    root.append(res);
+  }
   if (!SW.length) return;
   const opts = SW.map((s, i) => [i, s.label]);
   const pick = (key, none) => {
@@ -881,6 +897,11 @@ function renderTune() {
   root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ন্যূনতম ট্রেড (সব)', mt),
     h('button', {class: 'btn g', style: 'align-self:flex-end', on: {click: doSweep}}, '🎛 টিউনিং চালান'))));
   root.append(h('div', {id: 'sweepRes'}));
+}
+function renderMulti(box, r) {
+  const rows = r.rows.map(x => x.note ? '<tr><td>' + x.name + '</td><td colspan="7" class="note">' + x.note + '</td></tr>'
+    : '<tr><td>' + x.name + '</td><td>' + x.n + '</td><td class="' + cls(x.net) + '">' + inr(x.net) + '</td><td>' + x.pf.toFixed(2) + '</td><td>' + x.win.toFixed(0) + '%</td><td>' + inr(x.dd) + '</td><td>' + x.rec.toFixed(2) + '</td><td>' + x.pm.toFixed(0) + '%</td></tr>').join('');
+  box.innerHTML = '<div class="card"><div class="body"><div class="scroll"><table><tr><th>ইনডেক্স</th><th>ট্রেড</th><th>নেট</th><th>PF</th><th>Win</th><th>DD</th><th>Recov.</th><th>লাভের মাস</th></tr>' + rows + '</table></div></div></div>';
 }
 async function doSweep() {
   const params = [];
@@ -958,11 +979,26 @@ function renderData() {
     const ds = META.datasets;
     const sel = h('select', {}, ...ds.map(d => h('option', {value: d.inst, selected: d.inst === i.inst}, d.name + ' — স্পট ' + d.spot_from + ' → ' + d.spot_to + (d.contracts ? ' | অপশন ' + d.done + '/' + d.contracts + ' কন্ট্র্যাক্ট' : ' | অপশন নেই'))));
     const f0 = h('input', {type: 'date', value: i.from || ''}), f1 = h('input', {type: 'date', value: i.to || ''});
-    const msg = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'ইনডেক্স ও সময় বেছে "লোড করুন" চাপুন। তারিখ ফাঁকা রাখলে শেষ ~৬ মাস। সময় যত বেশি, মেমোরি ও লোড তত বেশি।');
+    const msg = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'ইনডেক্স ও সময় বেছে "লোড করুন" চাপুন। তারিখ ফাঁকা = সব ডেটা (লোড হতে কয়েক মিনিট লাগতে পারে, বেশি মেমোরি লাগে)। দরকারে তারিখ সীমা দিন।');
     const btn = h('button', {class: 'btn s'}, '⬇ লোড করুন');
     btn.addEventListener('click', async () => { btn.disabled = true; const ok = await loadDS(sel.value, f0.value, f1.value, msg); if (!ok) btn.disabled = false; });
     root.append(h('div', {class: 'h2'}, 'ডেটাসেট বেছে নিন'));
     root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('ইনডেক্স', sel), F('শুরু (ঐচ্ছিক)', f0), F('শেষ (ঐচ্ছিক)', f1), btn, msg)));
+  }
+  if (i.mode === 'db') {
+    const log = h('pre', {class: 'note', style: 'flex:1 1 100%;max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;margin:0'}, 'আপডেটে স্পট, ফিউচার ভলিউম ও অপশনের নতুন অংশ নামে। প্রথমবার বা বেশি দিন বাকি থাকলে সময় লাগে। চলার সময় এই পাতা খোলা রাখুন।');
+    const ub = h('button', {class: 'btn g'}, '🔄 ডেটা আপডেট');
+    const poll = async () => {
+      if (!document.body.contains(log)) return;
+      const s = await api('/api/update/status');
+      if (s.log && s.log.length) { log.textContent = s.log.join('\n'); log.scrollTop = log.scrollHeight; }
+      if (s.running) { ub.disabled = true; setTimeout(poll, 3000); }
+      else { ub.disabled = false; if (s.log && s.log.length) log.textContent += '\n\n✔ শেষ। নতুন ডেটা দেখতে ওপরের "লোড করুন" চাপুন।'; }
+    };
+    ub.addEventListener('click', async () => { const r = await api('/api/update', {}); if (r.error) { alert(r.error); return; } poll(); });
+    poll();
+    root.append(h('div', {class: 'h2'}, 'ডেটা আপডেট'));
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, ub, log)));
   }
   root.append(h('div', {class: 'h2'}, 'লোড করা ডেটা'));
   root.append(h('div', {class: 'kpis'},

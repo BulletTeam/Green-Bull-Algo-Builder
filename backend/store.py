@@ -11,6 +11,15 @@ SCHEMA = [
         o REAL, h REAL, l REAL, c REAL, v REAL,
         PRIMARY KEY (instr, t)
     ) WITHOUT ROWID""",
+    """CREATE TABLE IF NOT EXISTS fvol (
+        instr TEXT NOT NULL,
+        t INTEGER NOT NULL,            -- মিনিট (স্পটের মতো)
+        v INTEGER, oi INTEGER,         -- নিকটতম মাসিক ফিউচারের ভলিউম ও OI
+        PRIMARY KEY (instr, t)
+    ) WITHOUT ROWID""",
+    """CREATE TABLE IF NOT EXISTS fstate (
+        instr TEXT NOT NULL, expiry TEXT NOT NULL, done INTEGER, rows INTEGER, updated_at TEXT,
+        PRIMARY KEY (instr, expiry))""",
     """CREATE TABLE IF NOT EXISTS runs (
         id INTEGER PRIMARY KEY,
         run_at TEXT, instr TEXT, action TEXT, ok INTEGER, detail TEXT)""",
@@ -62,6 +71,19 @@ def summary(c, instr):
         "bad_ohlc": bad,
         "short_days": short,
     }
+
+
+def fut_is_done(c, instr, expiry):
+    row = c.execute("SELECT done FROM fstate WHERE instr=? AND expiry=?", (instr, expiry)).fetchone()
+    return bool(row and row[0])
+
+
+def fut_save(c, instr, expiry, rows, done):
+    """rows: (t, v, oi)। ফিউচারের ভলিউম সেভ + অবস্থা লেখা।"""
+    c.executemany("INSERT OR REPLACE INTO fvol(instr, t, v, oi) VALUES (?,?,?,?)", [(instr,) + r for r in rows])
+    c.execute("INSERT OR REPLACE INTO fstate(instr, expiry, done, rows, updated_at) VALUES (?,?,?,?,?)",
+              (instr, expiry, int(done), len(rows), dt.datetime.now().isoformat(timespec="seconds")))
+    c.commit()
 
 
 def log(c, instr, action, ok, detail):
@@ -119,6 +141,14 @@ def opt_contract(c, instr, ct):
          ct.get("instrument_type"), int(bool(ct.get("weekly"))), ct.get("lot_size"), ct.get("trading_symbol")),
     )
     return cur.lastrowid
+
+
+def opt_expiry_complete(c, instr, ex):
+    """এই এক্সপায়ারির সব কন্ট্র্যাক্ট আগেই সম্পূর্ণ নামলে True (তখন API কল ছাড়াই বাদ দেওয়া যায়)।"""
+    n, d = c.execute(
+        "SELECT COUNT(*), COALESCE(SUM(s.done),0) FROM contracts k LEFT JOIN ostate s ON s.cid=k.cid "
+        "WHERE k.instr=? AND k.expiry=?", (instr, ex.isoformat())).fetchone()
+    return n > 0 and n == d
 
 
 def opt_is_done(c, cid):

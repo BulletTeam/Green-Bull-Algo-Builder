@@ -137,13 +137,17 @@ def run(code, f_from=None, f_to=None):
     total = 0
     try:
         print("[%s] %d টি এক্সপায়ারি" % (code, len(xs)))
+        skipped = 0
         for n, ex in enumerate(xs, 1):
+            if store.opt_expiry_complete(oc, code, ex):
+                skipped += 1
+                continue
             msg, rows, _ = do_expiry(code, ex, spot, oc, last_day)
             total += rows
             print("[%s] %d/%d %s: %s | %.0f মিনিট" % (code, n, len(xs), ex, msg, (time.time() - t0) / 60))
     finally:
         oc.close()
-    print("[%s] শেষ: নতুন %d বার, %.1f মিনিট" % (code, total, (time.time() - t0) / 60))
+    print("[%s] শেষ: নতুন %d বার, আগেই সম্পূর্ণ ছিল %d এক্সপায়ারি, %.1f মিনিট" % (code, total, skipped, (time.time() - t0) / 60))
 
 
 def status():

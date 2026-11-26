@@ -24,6 +24,7 @@ import bisect
 import argparse
 import itertools
 import threading
+import subprocess
 import traceback
 import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -85,6 +86,7 @@ def _spot_finish(D, log):
     global BASE_TF
     dd = np.diff(D.t)[np.diff(D.day) == 0]
     BASE_TF = int(np.median(dd)) if len(dd) else 5
+    D.base = BASE_TF
     D.du = np.unique(D.day)
     st = np.flatnonzero(np.r_[True, D.day[1:] != D.day[:-1]])
     en = np.r_[st[1:], len(D.day)]
@@ -168,7 +170,7 @@ INSTR_NAMES = {"BN": "BankNifty", "N50": "Nifty 50", "FIN": "FinNifty", "SEN": "
 
 def load_db(db_dir, inst, d0=None, d1=None, log=print):
     """নতুন SQLite ডেটা (gb.db স্পট + gb_opt.db অপশন) থেকে D বানায়। d0/d1 = 'YYYY-MM-DD' (ঐচ্ছিক)।
-    ফাঁকা থাকলে শেষ ~৬ মাস, কারণ ১-মিনিট ডেটা অনেক বড় — ফোনের মেমোরি বাঁচাতে।"""
+    ফাঁকা থাকলে সব ডেটা (সময় ও মেমোরি বেশি লাগে; দরকারে তারিখ সীমা দিন)।"""
     import sqlite3
     sp_path = os.path.join(db_dir, "gb.db")
     op_path = os.path.join(db_dir, "gb_opt.db")
@@ -179,13 +181,18 @@ def load_db(db_dir, inst, d0=None, d1=None, log=print):
     D._cache = {}
     con = sqlite3.connect(sp_path, timeout=30)
     try:
-        last = con.execute("SELECT MAX(t) FROM bars WHERE instr=?", (inst,)).fetchone()[0]
+        first, last = con.execute("SELECT MIN(t), MAX(t) FROM bars WHERE instr=?", (inst,)).fetchone()
         if last is None:
             raise ValueError("%s-এর স্পট ডেটা gb.db-তে নেই" % inst)
         day1 = day_int(d1) if d1 else int(last // 1440)
-        day0 = day_int(d0) if d0 else day1 - 182
+        day0 = day_int(d0) if d0 else int(first // 1440)
         rows = con.execute("SELECT t,o,h,l,c,v FROM bars WHERE instr=? AND t>=? AND t<? ORDER BY t",
                            (inst, day0 * 1440, (day1 + 1) * 1440)).fetchall()
+        try:
+            fv = con.execute("SELECT t,v FROM fvol WHERE instr=? AND t>=? AND t<? ORDER BY t",
+                             (inst, day0 * 1440, (day1 + 1) * 1440)).fetchall()
+        except sqlite3.OperationalError:
+            fv = []
     finally:
         con.close()
     if not rows:
@@ -196,6 +203,11 @@ def load_db(db_dir, inst, d0=None, d1=None, log=print):
     keep = (mod >= OPEN_MIN) & (mod <= OPEN_MIN + 374)
     D.t = t[keep]
     D.o, D.h, D.l, D.c, D.v = (a[keep, k].copy() for k in (1, 2, 3, 4, 5))
+    if fv:      # স্পট ইনডেক্সে ভলিউম নেই, তাই নিকটতম মাসিক ফিউচারের ভলিউম বসাই
+        fa = np.array(fv, dtype="float64")
+        ft = fa[:, 0].astype("int64")
+        idx = np.minimum(np.searchsorted(ft, D.t), len(ft) - 1)
+        D.v = np.where(ft[idx] == D.t, fa[idx, 1], 0.0)
     _spot_finish(D, log)
 
     D.opt = {}
@@ -1651,6 +1663,64 @@ def clean(o):
     return o
 
 
+def run_multi(payload, prog):
+    """একই স্ট্র্যাটেজি একাধিক ইনডেক্সে পালা করে চালায় (প্রতিটির ডেটা লোড করে, চালিয়ে, ছেড়ে দেয়)"""
+    global BASE_TF
+    src = DATA.get("src")
+    if not src or src.get("mode") != "db":
+        raise ValueError("মাল্টি-ইনডেক্সের জন্য --db (SQLite) মোডে চালাতে হবে")
+    insts = [str(x).upper() for x in payload.get("insts", [])]
+    if not insts:
+        raise ValueError("অন্তত একটা ইনডেক্স বাছুন")
+    keep_base = BASE_TF
+    rows = []
+    try:
+        for k, inst in enumerate(insts):
+            row = {"inst": inst, "name": INSTR_NAMES.get(inst, inst)}
+            try:
+                D = load_db(src["db_dir"], inst, payload.get("from") or None, payload.get("to") or None, log=lambda *a: None)
+                if not D.expiries:
+                    row["note"] = "অপশন ডেটা নেই"
+                else:
+                    res = backtest(D, copy.deepcopy(payload["settings"]))
+                    a = res["stats"]["all"]
+                    row.update(n=a["n"], net=a["net"], pf=a["pf"], win=a["win"], dd=a["dd"], dd_pct=a["dd_pct"],
+                               rec=a["rec"], exp=a["exp"], pm=a["pm"],
+                               span="%s → %s" % (day_str(D.du[0]), day_str(D.du[-1])))
+                del D
+            except Exception as e:
+                traceback.print_exc()
+                row["note"] = "%s: %s" % (type(e).__name__, str(e)[:100])
+            rows.append(row)
+            prog((k + 1) / len(insts))
+    finally:
+        BASE_TF = keep_base
+    return {"rows": rows}
+
+
+UPD = {"running": False, "log": [], "started": ""}
+
+
+def run_update(backend_dir, db_dir):
+    """backend-এর ডাউনলোডারগুলো পালা করে চালায়: স্পট → ফিউচার ভলিউম → অপশন"""
+    env = dict(os.environ, GB_HOME=db_dir, PYTHONUNBUFFERED="1")
+    try:
+        for name, script in (("স্পট", "downloader.py"), ("ফিউচার ভলিউম", "futures.py"), ("অপশন", "options.py")):
+            UPD["log"].append("== %s ==" % name)
+            p = subprocess.Popen([sys.executable, "-u", script], cwd=backend_dir, env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in p.stdout:
+                UPD["log"].append(line.rstrip())
+                del UPD["log"][:-300]
+            p.wait()
+            if p.returncode:
+                UPD["log"].append("⚠ %s ধাপ ত্রুটিতে থেমেছে (কোড %s)" % (name, p.returncode))
+    except Exception as e:
+        UPD["log"].append("ত্রুটি: %s" % e)
+    finally:
+        UPD["running"] = False
+
+
 def start_job(kind, payload):
     JOB_N[0] += 1
     jid = str(JOB_N[0])
@@ -1667,6 +1737,8 @@ def start_job(kind, payload):
                 D = DATA["D"]
                 if kind == "run":
                     res = backtest(D, payload["settings"], progress=prog)
+                elif kind == "multi":
+                    res = run_multi(payload, prog)
                 else:
                     res = run_sweep(D, payload["settings"], payload["params"], progress=prog)
                 JOBS[jid].update(status="done", progress=1.0, result=clean(res),
@@ -1689,7 +1761,8 @@ def data_info():
     return {"spot_from": day_str(D.du[0]), "spot_to": day_str(D.du[-1]), "spot_days": int(len(D.du)),
             "expiries": ex, "contracts": len(D.opt), "base": BASE_TF,
             "name": src.get("name", "BankNifty"), "inst": src.get("inst", ""), "mode": src.get("mode", "csv"),
-            "from": src.get("from", ""), "to": src.get("to", "")}
+            "from": src.get("from", ""), "to": src.get("to", ""),
+            "vol_days": int(len(np.unique(D.day[D.v > 0])))}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1718,6 +1791,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "case": default_case(1), "slot": slot(), "info": data_info(),
                                    "datasets": (datasets_info(DATA["src"]["db_dir"]) if (DATA.get("src") or {}).get("mode") == "db" else None),
                                    "presets": {"builtin": builtin_presets(), "user": load_user_presets()}})
+            if u.path == "/api/update/status":
+                return self._json({"running": UPD["running"], "log": UPD["log"][-60:], "started": UPD["started"]})
             if u.path == "/api/job":
                 jid = parse_qs(u.query).get("id", [""])[0]
                 j = JOBS.get(jid)
@@ -1734,6 +1809,18 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             if u.path == "/api/start":
                 return self._json({"id": start_job(body["kind"], body)})
+            if u.path == "/api/update":
+                src = DATA.get("src")
+                bd = DATA.get("backend") or ""
+                if not src or src.get("mode") != "db":
+                    return self._json({"error": "আপডেট শুধু --db মোডে"}, 400)
+                if not os.path.exists(os.path.join(bd, "downloader.py")):
+                    return self._json({"error": "backend ফোল্ডার পাওয়া যায়নি: %s (--backend দিয়ে দিন)" % bd}, 400)
+                if UPD["running"]:
+                    return self._json({"started": False})
+                UPD.update(running=True, log=[], started=dt.datetime.now().isoformat(timespec="seconds"))
+                threading.Thread(target=run_update, args=(bd, src["db_dir"]), daemon=True).start()
+                return self._json({"started": True})
             if u.path == "/api/load":
                 src = DATA.get("src")
                 if not src or src.get("mode") != "db":
@@ -1771,7 +1858,9 @@ def main():
     ap.add_argument("--opt", default="data_opt")
     ap.add_argument("--db", default="", help="gb.db ও gb_opt.db যে ফোল্ডারে আছে (SQLite মোড)")
     ap.add_argument("--inst", default="N50", help="SQLite মোডে: BN, N50, FIN, SEN")
-    ap.add_argument("--from", dest="d_from", default="", help="শুরুর তারিখ YYYY-MM-DD (ফাঁকা = শেষ ~৬ মাস)")
+    ap.add_argument("--from", dest="d_from", default="", help="শুরুর তারিখ YYYY-MM-DD (ফাঁকা = সব ডেটা)")
+    ap.add_argument("--backend", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"),
+                    help="downloader.py ইত্যাদির ফোল্ডার (ডেটা আপডেট বোতামের জন্য)")
     ap.add_argument("--to", dest="d_to", default="", help="শেষ তারিখ YYYY-MM-DD")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--host", default="127.0.0.1")
@@ -1782,6 +1871,7 @@ def main():
         inst = a.inst.upper()
         DATA["D"] = load_db(db_dir, inst, a.d_from or None, a.d_to or None)
         D = DATA["D"]
+        DATA["backend"] = os.path.abspath(os.path.expanduser(a.backend))
         DATA["src"] = {"mode": "db", "db_dir": db_dir, "inst": inst, "name": INSTR_NAMES.get(inst, inst),
                        "from": day_str(D.du[0]), "to": day_str(D.du[-1])}
         if not D.expiries:

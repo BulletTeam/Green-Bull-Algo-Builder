@@ -118,3 +118,12 @@ def fetch_option_1m(ikey, d0, d1):
             rows += data.get("candles", []) or []
         cur = nxt + dt.timedelta(days=1)
     return ok, rows
+
+
+def get_futures(key, expiry):
+    """(status, ফিউচার কন্ট্র্যাক্টের তালিকা) — একটি মাসিক এক্সপায়ারির।"""
+    url = "%s/future/contract?instrument_key=%s&expiry_date=%s" % (V2, quote(key, safe=""), expiry.isoformat())
+    st, body = get(url)
+    if st == 401:
+        raise TokenError("401: টোকেন কাজ করছে না বা মেয়াদ শেষ")
+    return st, _list(body)
