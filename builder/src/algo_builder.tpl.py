@@ -1464,6 +1464,10 @@ def backtest(D, raw, light=False, progress=None, now=None):
         return out
     out["trades"] = trades
     out["an"] = analyze(trades, cap, BASE_TF)
+    try:
+        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None)
+    except Exception as e:
+        out["an"]["adv"] = {"err": str(e)}
     eq, cum = [], 0.0
     for t in trades:
         cum += t["net"]
@@ -1476,6 +1480,111 @@ def backtest(D, raw, light=False, progress=None, now=None):
     out["yearly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(yr.items())]
     out["monthly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(mo.items())]
     return out
+
+
+
+def advanced_stats(trades, cap, days_list, Sx=None):
+    """Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার, রেজিম, মার্জিন-ROI"""
+    if not trades:
+        return {}
+    by = {}
+    for t in trades:
+        by[t["date"]] = by.get(t["date"], 0.0) + t["net"]
+    days = list(days_list) if days_list else sorted(by)
+    dp = np.array([by.get(d, 0.0) for d in days], float)
+    nd = len(dp)
+    mu, sd = float(dp.mean()), float(dp.std(ddof=1)) if nd > 1 else 0.0
+    dn = dp[dp < 0]
+    dsd = float(np.sqrt((np.minimum(dp, 0) ** 2).mean())) if nd else 0.0
+    sharpe = mu / sd * np.sqrt(252) if sd > 0 else 0.0
+    sortino = mu / dsd * np.sqrt(252) if dsd > 0 else 0.0
+    eq = np.cumsum(dp)
+    pk = np.maximum.accumulate(np.r_[0.0, eq])[1:]
+    ddv = eq - pk
+    mdd = float(ddv.min())
+    yrs = max(nd / 252.0, 1e-9)
+    ann = float(eq[-1]) / yrs
+    calmar = ann / abs(mdd) if mdd < 0 else 0.0
+    # আন্ডারওয়াটার
+    uw = best = 0
+    for x in ddv:
+        uw = uw + 1 if x < 0 else 0
+        best = max(best, uw)
+    # SQN (R না থাকলে নেট ব্যবহার)
+    rs = np.array([t["r"] for t in trades if t.get("r") is not None], float)
+    base_r = rs if len(rs) >= max(10, 0.8 * len(trades)) else np.array([t["net"] for t in trades], float)
+    sqn = float(np.sqrt(len(base_r)) * base_r.mean() / base_r.std(ddof=1)) if len(base_r) > 1 and base_r.std(ddof=1) > 0 else 0.0
+    # E-ratio = গড় MFE ÷ গড় MAE (শতাংশে, দুটোই ধনাত্মক ধরে)
+    mfe = np.array([abs(t["mfe"]) for t in trades], float)
+    mae = np.array([abs(t["mae"]) for t in trades], float)
+    eratio = float(mfe.mean() / mae.mean()) if mae.mean() > 0 else 0.0
+    dep = np.array([t["entry"] * t["qty"] for t in trades], float)
+    out = {"sharpe": float(sharpe), "sortino": float(sortino), "calmar": float(calmar), "sqn": sqn, "eratio": eratio,
+           "ann_net": ann, "ann_pct": 100.0 * ann / cap if cap else 0.0, "uw_max": int(best), "uw_now": int(uw), "days": nd,
+           "avg_deployed": float(dep.mean()), "roi_deployed": float(100.0 * sum(t["net"] for t in trades) / dep.sum()) if dep.sum() > 0 else 0.0,
+           "daily_win": float(100.0 * (dp > 0).sum() / max(1, (dp != 0).sum()))}
+    # রেজিম
+    reg = {}
+    if Sx is not None:
+        def bucket(name, cuts, labels):
+            a = Sx.get(name)
+            if a is None:
+                return None
+            g = {}
+            for t in trades:
+                try:
+                    v = float(a[t["ib"]])
+                except Exception:
+                    continue
+                if not np.isfinite(v):
+                    continue
+                k = labels[int(np.searchsorted(cuts, v, side="right"))]
+                g.setdefault(k, []).append(t)
+            rows = []
+            for k in labels:
+                if k in g:
+                    st = calc_stats(g[k], cap)
+                    rows.append({"k": k, "n": st["n"], "win": st["win"], "net": st["net"], "pf": st["pf"], "exp": st["exp"]})
+            return rows
+        try:
+            reg["adx"] = bucket("adx", [20, 30], ["ADX<20 (রেঞ্জ)", "ADX 20-30", "ADX>30 (ট্রেন্ড)"])
+            a = Sx.get("atr")
+            if a is not None:
+                vv = np.array([a[t["ib"]] for t in trades], float)
+                ok = vv[np.isfinite(vv)]
+                if len(ok) >= 9:
+                    q1, q2 = np.percentile(ok, [33.3, 66.7])
+                    reg["atr"] = bucket("atr", [q1, q2], ["কম অস্থিরতা (ATR)", "মাঝারি অস্থিরতা", "বেশি অস্থিরতা"])
+            reg["rsi"] = bucket("rsi", [40, 60], ["RSI<40", "RSI 40-60", "RSI>60"])
+        except Exception:
+            pass
+    out["regime"] = {k: v for k, v in reg.items() if v}
+    # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
+    hm = {}
+    for t in trades:
+        k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
+        hm[k] = hm.get(k, 0.0) + t["net"]
+    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hm.items()]
+    mh = {}
+    for t in trades:
+        mh[(t["date"][:4], int(t["date"][5:7]))] = mh.get((t["date"][:4], int(t["date"][5:7])), 0.0) + t["net"]
+    out["heat_month"] = [{"y": k[0], "m": k[1], "net": v} for k, v in sorted(mh.items())]
+    out["scatter"] = [[round(abs(t["mae"]), 1), round(abs(t["mfe"]), 1), 1 if t["net"] > 0 else 0] for t in trades][:1500]
+    return out
+
+
+def stress_test(D, raw):
+    """স্লিপেজ/খরচ স্ট্রেস: আসল ইঞ্জিনে বাড়িয়ে আবার চালানো"""
+    base = norm_settings(raw)
+    rows = []
+    for lab, ms, mb in (("এখনকার খরচ", 1, 1), ("স্লিপেজ ×2", 2, 1), ("স্লিপেজ ×3", 3, 1), ("স্লিপেজ ×3 + ব্রোকারেজ ×1.5", 3, 1.5)):
+        s = copy.deepcopy(base)
+        s["general"]["slip"] = float(base["general"]["slip"]) * ms
+        s["general"]["brokerage"] = float(base["general"]["brokerage"]) * mb
+        r = backtest(D, s, light=True)
+        a = r["stats"]["all"]
+        rows.append({"k": lab, "n": a["n"], "net": a["net"], "pf": a["pf"], "win": a["win"], "dd": a["dd"], "exp": a["exp"]})
+    return {"rows": rows}
 
 
 # =====================================================================
@@ -3332,6 +3441,8 @@ def start_job(kind, payload):
                 D = DATA["D"]
                 if kind == "run":
                     res = backtest(D, payload["settings"], progress=prog)
+                elif kind == "stress":
+                    res = stress_test(D, payload["settings"])
                 elif kind == "advise2":
                     res = advise2(D, payload["settings"], payload.get("opts", {}), progress=prog)
                 elif kind == "advise":

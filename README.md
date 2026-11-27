@@ -71,3 +71,6 @@ python algo_builder.py --db ~/greenbull-data --inst N50
 
 ### AI Advisor v2 (গভীর বিশ্লেষণ)
 Rule Ablation (কোন এন্ট্রি-শর্ত কাজ করছে), Filter Mining (আসল ইঞ্জিনে যাচাই), স্মার্ট সার্চ (random + hill-climb) ও রোলিং Walk-Forward। AI ট্যাবে "🔬 গভীর বিশ্লেষণ (v2)"। সাথে: হোল্ড-টাইম সংশোধন, লং-SL ফ্লোর ০.০৫।
+
+### উন্নত অ্যানালিটিক্স (Results ট্যাব)
+Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার দিন, বিনিয়োগ-ROI, ADX/ATR/RSI রেজিম ব্রেকডাউন, MAE-MFE স্ক্যাটার, সময়×বার ও মাসিক হিটম্যাপ, এবং স্লিপেজ/খরচ স্ট্রেস টেস্ট।

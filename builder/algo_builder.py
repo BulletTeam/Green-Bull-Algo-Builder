@@ -1464,6 +1464,10 @@ def backtest(D, raw, light=False, progress=None, now=None):
         return out
     out["trades"] = trades
     out["an"] = analyze(trades, cap, BASE_TF)
+    try:
+        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None)
+    except Exception as e:
+        out["an"]["adv"] = {"err": str(e)}
     eq, cum = [], 0.0
     for t in trades:
         cum += t["net"]
@@ -1476,6 +1480,111 @@ def backtest(D, raw, light=False, progress=None, now=None):
     out["yearly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(yr.items())]
     out["monthly"] = [dict(k=k, **calc_stats(v, cap)) for k, v in sorted(mo.items())]
     return out
+
+
+
+def advanced_stats(trades, cap, days_list, Sx=None):
+    """Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার, রেজিম, মার্জিন-ROI"""
+    if not trades:
+        return {}
+    by = {}
+    for t in trades:
+        by[t["date"]] = by.get(t["date"], 0.0) + t["net"]
+    days = list(days_list) if days_list else sorted(by)
+    dp = np.array([by.get(d, 0.0) for d in days], float)
+    nd = len(dp)
+    mu, sd = float(dp.mean()), float(dp.std(ddof=1)) if nd > 1 else 0.0
+    dn = dp[dp < 0]
+    dsd = float(np.sqrt((np.minimum(dp, 0) ** 2).mean())) if nd else 0.0
+    sharpe = mu / sd * np.sqrt(252) if sd > 0 else 0.0
+    sortino = mu / dsd * np.sqrt(252) if dsd > 0 else 0.0
+    eq = np.cumsum(dp)
+    pk = np.maximum.accumulate(np.r_[0.0, eq])[1:]
+    ddv = eq - pk
+    mdd = float(ddv.min())
+    yrs = max(nd / 252.0, 1e-9)
+    ann = float(eq[-1]) / yrs
+    calmar = ann / abs(mdd) if mdd < 0 else 0.0
+    # আন্ডারওয়াটার
+    uw = best = 0
+    for x in ddv:
+        uw = uw + 1 if x < 0 else 0
+        best = max(best, uw)
+    # SQN (R না থাকলে নেট ব্যবহার)
+    rs = np.array([t["r"] for t in trades if t.get("r") is not None], float)
+    base_r = rs if len(rs) >= max(10, 0.8 * len(trades)) else np.array([t["net"] for t in trades], float)
+    sqn = float(np.sqrt(len(base_r)) * base_r.mean() / base_r.std(ddof=1)) if len(base_r) > 1 and base_r.std(ddof=1) > 0 else 0.0
+    # E-ratio = গড় MFE ÷ গড় MAE (শতাংশে, দুটোই ধনাত্মক ধরে)
+    mfe = np.array([abs(t["mfe"]) for t in trades], float)
+    mae = np.array([abs(t["mae"]) for t in trades], float)
+    eratio = float(mfe.mean() / mae.mean()) if mae.mean() > 0 else 0.0
+    dep = np.array([t["entry"] * t["qty"] for t in trades], float)
+    out = {"sharpe": float(sharpe), "sortino": float(sortino), "calmar": float(calmar), "sqn": sqn, "eratio": eratio,
+           "ann_net": ann, "ann_pct": 100.0 * ann / cap if cap else 0.0, "uw_max": int(best), "uw_now": int(uw), "days": nd,
+           "avg_deployed": float(dep.mean()), "roi_deployed": float(100.0 * sum(t["net"] for t in trades) / dep.sum()) if dep.sum() > 0 else 0.0,
+           "daily_win": float(100.0 * (dp > 0).sum() / max(1, (dp != 0).sum()))}
+    # রেজিম
+    reg = {}
+    if Sx is not None:
+        def bucket(name, cuts, labels):
+            a = Sx.get(name)
+            if a is None:
+                return None
+            g = {}
+            for t in trades:
+                try:
+                    v = float(a[t["ib"]])
+                except Exception:
+                    continue
+                if not np.isfinite(v):
+                    continue
+                k = labels[int(np.searchsorted(cuts, v, side="right"))]
+                g.setdefault(k, []).append(t)
+            rows = []
+            for k in labels:
+                if k in g:
+                    st = calc_stats(g[k], cap)
+                    rows.append({"k": k, "n": st["n"], "win": st["win"], "net": st["net"], "pf": st["pf"], "exp": st["exp"]})
+            return rows
+        try:
+            reg["adx"] = bucket("adx", [20, 30], ["ADX<20 (রেঞ্জ)", "ADX 20-30", "ADX>30 (ট্রেন্ড)"])
+            a = Sx.get("atr")
+            if a is not None:
+                vv = np.array([a[t["ib"]] for t in trades], float)
+                ok = vv[np.isfinite(vv)]
+                if len(ok) >= 9:
+                    q1, q2 = np.percentile(ok, [33.3, 66.7])
+                    reg["atr"] = bucket("atr", [q1, q2], ["কম অস্থিরতা (ATR)", "মাঝারি অস্থিরতা", "বেশি অস্থিরতা"])
+            reg["rsi"] = bucket("rsi", [40, 60], ["RSI<40", "RSI 40-60", "RSI>60"])
+        except Exception:
+            pass
+    out["regime"] = {k: v for k, v in reg.items() if v}
+    # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
+    hm = {}
+    for t in trades:
+        k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
+        hm[k] = hm.get(k, 0.0) + t["net"]
+    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hm.items()]
+    mh = {}
+    for t in trades:
+        mh[(t["date"][:4], int(t["date"][5:7]))] = mh.get((t["date"][:4], int(t["date"][5:7])), 0.0) + t["net"]
+    out["heat_month"] = [{"y": k[0], "m": k[1], "net": v} for k, v in sorted(mh.items())]
+    out["scatter"] = [[round(abs(t["mae"]), 1), round(abs(t["mfe"]), 1), 1 if t["net"] > 0 else 0] for t in trades][:1500]
+    return out
+
+
+def stress_test(D, raw):
+    """স্লিপেজ/খরচ স্ট্রেস: আসল ইঞ্জিনে বাড়িয়ে আবার চালানো"""
+    base = norm_settings(raw)
+    rows = []
+    for lab, ms, mb in (("এখনকার খরচ", 1, 1), ("স্লিপেজ ×2", 2, 1), ("স্লিপেজ ×3", 3, 1), ("স্লিপেজ ×3 + ব্রোকারেজ ×1.5", 3, 1.5)):
+        s = copy.deepcopy(base)
+        s["general"]["slip"] = float(base["general"]["slip"]) * ms
+        s["general"]["brokerage"] = float(base["general"]["brokerage"]) * mb
+        r = backtest(D, s, light=True)
+        a = r["stats"]["all"]
+        rows.append({"k": lab, "n": a["n"], "net": a["net"], "pf": a["pf"], "win": a["win"], "dd": a["dd"], "exp": a["exp"]})
+    return {"rows": rows}
 
 
 # =====================================================================
@@ -3332,6 +3441,8 @@ def start_job(kind, payload):
                 D = DATA["D"]
                 if kind == "run":
                     res = backtest(D, payload["settings"], progress=prog)
+                elif kind == "stress":
+                    res = stress_test(D, payload["settings"])
                 elif kind == "advise2":
                     res = advise2(D, payload["settings"], payload.get("opts", {}), progress=prog)
                 elif kind == "advise":
@@ -4085,6 +4196,7 @@ function renderResults(res) {
     root.append(h('h3', {}, ttl));
     root.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'DD ₹'], arr.map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), inr(r.dd)]), '360px'));
   };
+  if (N.adv && !N.adv.err) drawAdv(root, N.adv);
   per(res.yearly, 'বছর অনুযায়ী'); per(res.monthly, 'মাস অনুযায়ী');
   root.append(h('h3', {}, 'ট্রেড তালিকা'));
   const jn = h('input', {type: 'number', inputmode: 'numeric', placeholder: 'ট্রেড নং (১ থেকে ' + res.trades.length + ')', style: 'flex:1'});
@@ -4096,6 +4208,66 @@ function renderResults(res) {
     res.trades.map((t, k) => '<tr data-i="' + k + '" style="cursor:pointer"><td>' + (k + 1) + '</td><td>' + t.date + '</td><td>' + t.side + '</td><td>' + t.in + '</td><td>' + t.out + '</td><td>' + t.entry + '</td><td>' + t.exit + '</td><td>' + legTxt(t) + '</td><td>' + t.mae + '</td><td>' + t.mfe + '</td><td>' + (t.r == null ? '–' : t.r) + '</td><td class="' + cls(t.net) + '">' + Math.round(t.net) + '</td></tr>').join('') + '</table>'});
   tb.addEventListener('click', e => { const r = e.target.closest('tr[data-i]'); if (r) openChart(parseInt(r.dataset.i)); });
   root.append(tb);
+}
+
+/* ---------- উন্নত অ্যানালিটিক্স ও চার্ট ---------- */
+function heatCell(v, mx) {
+  const a = Math.min(1, Math.abs(v) / (mx || 1)) * 0.75;
+  return '<td style="background:' + (v >= 0 ? 'rgba(38,194,129,' : 'rgba(255,93,93,') + a.toFixed(2) + ');text-align:center;font-size:10.5px;padding:3px 2px">' + (v === 0 ? '' : (Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'k' : Math.round(v))) + '</td>';
+}
+function drawAdv(root, V) {
+  root.append(h('h3', {}, '📐 রিস্ক-অ্যাডজাস্টেড মেট্রিক্স'));
+  root.append(tbl(['মেট্রিক', 'মান', 'মানে'], [
+    ['Sharpe (দৈনিক P&L, ×√252)', f2(V.sharpe), '১+ ভালো, ২+ খুব ভালো'],
+    ['Sortino', f2(V.sortino), 'শুধু লসের ওঠানামা ধরে'],
+    ['Calmar (বার্ষিক নেট ÷ Max DD)', f2(V.calmar), '১+ গ্রহণযোগ্য'],
+    ['SQN', f2(V.sqn), '২+ ভালো, ৩+ খুব ভালো (১০০+ ট্রেডে অর্থপূর্ণ)'],
+    ['E-ratio (গড় MFE ÷ গড় MAE)', f2(V.eratio), '১-এর বেশি = এন্ট্রিতে সামান্য ধার আছে'],
+    ['বার্ষিক নেট (আনুমানিক)', pn(V.ann_net) + ' (' + V.ann_pct.toFixed(0) + '% মূলধনের)', V.days + ' ট্রেডিং-দিনের ভিত্তিতে'],
+    ['সবচেয়ে লম্বা আন্ডারওয়াটার', V.uw_max + ' দিন', 'এখন: ' + V.uw_now + ' দিন'],
+    ['গড় বিনিয়োগ প্রতি ট্রেড (প্রিমিয়াম)', inr(V.avg_deployed), 'বিনিয়োগের ওপর ROI: ' + V.roi_deployed.toFixed(1) + '%'],
+    ['লাভজনক দিন (ট্রেড হওয়া দিনের)', V.daily_win.toFixed(0) + '%', '']]));
+  const R = V.regime || {}, keys = Object.keys(R);
+  if (keys.length) {
+    root.append(h('h3', {}, '🌦 মার্কেট রেজিম অনুযায়ী (সিগন্যালের সময়ের মান)'));
+    keys.forEach(k => root.append(tbl(['রেজিম', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'গড়/ট্রেড'], R[k].map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), pn(r.exp)]))));
+    root.append(h('div', {class: 'note'}, 'কোন রেজিমে নেট ঋণাত্মক হলে সেখানে এন্ট্রি ফিল্টার (যেমন ADX শর্ত) যোগ করার কথা ভাবুন — AI v2-র ফিল্টার মাইনিং এটা যাচাই করে দেখে।'));
+  }
+  /* MAE/MFE স্ক্যাটার */
+  root.append(h('h3', {}, '🎯 MAE বনাম MFE (প্রতি ট্রেড)'));
+  const cv = h('canvas', {style: 'width:100%;height:230px;background:#10151d;border-radius:10px'});
+  root.append(cv);
+  root.append(h('div', {class: 'note'}, 'অনুভূমিক = সর্বোচ্চ উল্টো যাওয়া (MAE %), উল্লম্ব = সর্বোচ্চ ফেভারে যাওয়া (MFE %)। সবুজ = জেতা, লাল = হারা। লাল বিন্দু বাঁ-নিচে জমলে SL আরও টাইট করা যায়; সবুজ ডানে ছড়ালে SL ঢিলে রাখা দরকার।'));
+  setTimeout(() => {
+    const W = cv.clientWidth || 340, H = 230, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+    const P = V.scatter, mx = Math.max(10, ...P.map(p => p[0])) * 1.05, my = Math.max(10, ...P.map(p => p[1])) * 1.05, L = 34, B = 20;
+    g.strokeStyle = '#1c2431'; g.fillStyle = '#7d889b'; g.font = '10px sans-serif';
+    for (let i = 0; i <= 4; i++) {
+      const x = L + (W - L - 6) * i / 4, y = 6 + (H - B - 6) * (1 - i / 4);
+      g.beginPath(); g.moveTo(x, 6); g.lineTo(x, H - B); g.stroke(); g.beginPath(); g.moveTo(L, y); g.lineTo(W - 6, y); g.stroke();
+      g.textAlign = 'center'; g.fillText((mx * i / 4).toFixed(0), x, H - 6); g.textAlign = 'right'; g.fillText((my * i / 4).toFixed(0), L - 3, y + 3);
+    }
+    P.forEach(p => { g.fillStyle = p[2] ? 'rgba(38,194,129,.55)' : 'rgba(255,93,93,.55)'; g.beginPath(); g.arc(L + p[0] / mx * (W - L - 6), 6 + (H - B - 6) * (1 - p[1] / my), 2.6, 0, 6.3); g.fill(); });
+  }, 0);
+  /* হিটম্যাপ: দিন × সময় */
+  const slots = [...new Set(V.heat_slot.map(x => x.slot))].sort(), dows = ['সোম', 'মঙ্গল', 'বুধ', 'বৃহ', 'শুক্র'];
+  const hm = {}; let m1 = 1; V.heat_slot.forEach(x => { hm[x.dow + x.slot] = x.net; m1 = Math.max(m1, Math.abs(x.net)); });
+  root.append(h('h3', {}, '🔥 হিটম্যাপ: সময়-স্লট × সপ্তাহের দিন (নেট ₹)'));
+  root.append(h('div', {class: 'scroll', html: '<table><tr><th></th>' + dows.map(d => '<th>' + d + '</th>').join('') + '</tr>' + slots.map(sl => '<tr><th>' + sl + '</th>' + dows.map(d => heatCell(hm[d + sl] || 0, m1)).join('') + '</tr>').join('') + '</table>'}));
+  /* হিটম্যাপ: বছর × মাস */
+  const ys = [...new Set(V.heat_month.map(x => x.y))], hmm = {}; let m2 = 1; V.heat_month.forEach(x => { hmm[x.y + '-' + x.m] = x.net; m2 = Math.max(m2, Math.abs(x.net)); });
+  const MN = ['জানু', 'ফেব্রু', 'মার্চ', 'এপ্রি', 'মে', 'জুন', 'জুলা', 'আগ', 'সেপ্টে', 'অক্টো', 'নভে', 'ডিসে'];
+  root.append(h('h3', {}, '📅 মাসিক হিটম্যাপ (নেট ₹)'));
+  root.append(h('div', {class: 'scroll', html: '<table><tr><th></th>' + MN.map(m => '<th>' + m + '</th>').join('') + '</tr>' + ys.map(y => '<tr><th>' + y + '</th>' + MN.map((m, i) => hmm[y + '-' + (i + 1)] == null ? '<td></td>' : heatCell(hmm[y + '-' + (i + 1)], m2)).join('') + '</tr>').join('') + '</table>'}));
+  /* স্ট্রেস টেস্ট */
+  const box = h('div');
+  root.append(h('h3', {}, '🧪 স্লিপেজ / খরচ স্ট্রেস টেস্ট'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('button', {class: 'btn p', on: {click: async () => {
+    const r = await runJob({kind: 'stress', settings: S}, 'স্ট্রেস টেস্ট');
+    if (r) { box.innerHTML = ''; box.append(tbl(['পরিস্থিতি', 'ট্রেড', 'নেট ₹', 'PF', 'Win%', 'Max DD'], r.rows.map(x => [x.k, x.n, pn(x.net), f2(x.pf), x.win.toFixed(0) + '%', inr(x.dd)]))); box.append(h('div', {class: 'note'}, 'স্লিপেজ ×৩-এও নেট ধনাত্মক থাকলে স্ট্র্যাটেজি বাস্তবে (খারাপ ফিলে) টিকবে বলে আশা করা যায়; ×২-এই ঋণাত্মক হলে এজ খুব পাতলা।')); }
+  }}}, '▶ স্ট্রেস টেস্ট চালান'), h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'আসল ইঞ্জিনে ৪ বার চালায় (স্লিপেজ ২×, ৩×, ব্রোকারেজ ১.৫×)।'))));
+  root.append(box);
 }
 /* ---------- একটি ট্রেডের চার্ট (স্পট + প্রিমিয়াম) ---------- */
 const COLS = ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'];
