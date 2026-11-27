@@ -74,3 +74,6 @@ Rule Ablation (কোন এন্ট্রি-শর্ত কাজ করছ�
 
 ### উন্নত অ্যানালিটিক্স (Results ট্যাব)
 Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার দিন, বিনিয়োগ-ROI, ADX/ATR/RSI রেজিম ব্রেকডাউন, MAE-MFE স্ক্যাটার, সময়×বার ও মাসিক হিটম্যাপ, এবং স্লিপেজ/খরচ স্ট্রেস টেস্ট।
+
+### 🧩 Option Selling Lab (নতুন ট্যাব "Selling")
+Black-Scholes IV/Greeks, ৯টি টেমপ্লেট (Short Straddle/Strangle, Iron Condor/Butterfly, Bull Put/Bear Call, Ratio, Jade Lizard, Calendar), লেগ-SL, Basket SL/TP/Lock/Trail, Move-SL-to-Cost, Re-entry, Auto-Adjust, Auto-Hedge, IVP ফিল্টার, আনুমানিক মার্জিন/ROM, ইন্টারেক্টিভ Payoff (Expiry + T+0, ±1SD/2SD, স্লাইডার, Net Greeks)। এখনকার সংস্করণ ইন্ট্রাডে।

@@ -110,6 +110,7 @@ h3{margin:18px 2px 7px;font-size:14px;font-weight:700;letter-spacing:.2px}
   <button data-tab="res"><svg viewBox="0 0 24 24"><path d="M5 20V11M11 20V4M17 20v-6M3 20h18"/></svg>Results</button>
   <button data-tab="tune"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>Optimize</button>
   <button data-tab="ai"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.4L12 15l-1.8-4.6L5.5 9l4.7-1.4zM18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z"/></svg>AI</button>
+  <button data-tab="sell"><svg viewBox="0 0 24 24"><path d="M3 17l5-7 4 4 4-9 5 8"/><path d="M3 21h18"/></svg>Selling</button>
   <button data-tab="paper"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/></svg>Paper</button>
   <button data-tab="pre"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg>Library</button>
   <button data-tab="data"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>Data</button>
@@ -119,6 +120,7 @@ h3{margin:18px 2px 7px;font-size:14px;font-weight:700;letter-spacing:.2px}
   <section id="t-res" hidden><div class="note">এখনও কোনো রান হয়নি। নিচে ▶ Run চাপুন।</div></section>
   <section id="t-tune" hidden></section>
   <section id="t-ai" hidden></section>
+  <section id="t-sell" hidden></section>
   <section id="t-paper" hidden></section>
   <section id="t-pre" hidden></section>
   <section id="t-data" hidden></section>
@@ -668,7 +670,7 @@ function drawPane(cv, o, R) {
   let vals = [];
   (o.bars || []).forEach(k => { if (vis(k.t)) vals.push(k.h, k.l); });
   (o.lines || []).forEach(L => { if (!L.hide) L.data.forEach(p => { if (vis(p.t)) vals.push(p.v); }); });
-  (o.hl || []).forEach(v => vals.push(v)); (o.hlines || []).forEach(L => vals.push(L.v));
+  (o.steps || []).forEach(L => L.pts.forEach(p => { if (vis(p.t)) vals.push(p.v); })); (o.hl || []).forEach(v => vals.push(v)); (o.hlines || []).forEach(L => vals.push(L.v));
   g.fillStyle = '#10151d'; g.fillRect(0, 0, W, H);
   if (!vals.length) { g.fillStyle = '#8b96a8'; g.font = '11px sans-serif'; g.fillText(o.title + ' — এই অংশে ডেটা নেই', 8, 14); return; }
   let mn = Math.min(...vals), mx = Math.max(...vals); if (mx === mn) { mx += 1; mn -= 1; }
@@ -721,6 +723,14 @@ function drawPane(cv, o, R) {
     pill(g, fnum(L.v, 0.1), W - padR + 1, Y(L.v), L.color, '#0b0f14', 'left');
     g.fillStyle = L.color; g.font = '10px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(L.name, x0 + 4, Y(L.v) - 7);
   });
+  // ট্রেইলিং / ব্রেকইভেন SL-এর সিঁড়ি-রেখা
+  (o.steps || []).forEach(L => {
+    if (L.pts.length < 2) return;
+    g.strokeStyle = L.color; g.lineWidth = 1.6; g.setLineDash([2, 2]); g.beginPath();
+    L.pts.forEach((p, i) => { const x = X(p.t + o.step / 2), y = Y(p.v); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.stroke(); g.setLineDash([]);
+    const q = L.pts[L.pts.length - 1]; pill(g, 'SL ' + fnum(q.v, 100), X(q.t + o.step / 2), Y(q.v) + 12, L.color, '#0b0f14', 'center');
+  });
   // এন্ট্রি → এক্সিট সংযোগ ও মার্কার
   const mi = (o.marks || []).find(m => m.k === 'in'), mo = (o.marks || []).find(m => m.k === 'out');
   if (mi && mo) { g.strokeStyle = mo.win ? CU : CD; g.setLineDash([3, 3]); g.lineWidth = 1.4; g.beginPath(); g.moveTo(X(mi.t + o.step / 2), Y(mi.p)); g.lineTo(X(mo.t + o.step / 2), Y(mo.p)); g.stroke(); g.setLineDash([]); }
@@ -756,6 +766,13 @@ function drawPane(cv, o, R) {
   }
   g.setLineDash([]);
 }
+function stepSL(d, mIn, mOut) {
+  const sl = d.marks && d.marks.slh; if (!mIn || !mOut || !sl || !sl.length || d.marks.sl0 == null) return [];
+  const pts = [{t: mIn.t, v: d.marks.sl0}]; let cur = d.marks.sl0;
+  sl.forEach(x => { pts.push({t: x.t, v: cur}); pts.push({t: x.t, v: x.p}); cur = x.p; });
+  pts.push({t: mOut.t, v: cur});
+  return [{color: '#e5894f', pts}];
+}
 async function openChart(i) {
   if (!LAST || !LAST.trades.length) return;
   i = Math.max(0, Math.min(LAST.trades.length - 1, i)); CH.i = i;
@@ -780,7 +797,7 @@ async function openChart(i) {
     T.legs ? h('div', {style: 'margin-top:8px;font-size:11px;color:#8b96a8'}, 'আংশিক বুকিং: ', T.legs.map(l => h('span', {style: 'display:inline-block;margin:2px 6px 0 0;background:#1b2330;border:1px solid #2a3445;border-radius:6px;padding:2px 7px;color:#e8ebf0'}, l.why + ' ×' + l.q + ' লট @ ' + l.px + ' (' + l.t + ')'))) : null));
   const loading = h('div', {class: 'note', style: 'margin:10px'}, 'চার্ট লোড হচ্ছে...'); ov.append(loading);
   let d;
-  try { d = await api('/api/chart', {settings: JSON.parse(LASTRUN || JSON.stringify(S)), date: T.date, side: T.side, expiry: T.expiry, in: T.in, out: T.out, entry: T.entry, exit: T.exit, case: T.case, legs: T.legs}); } catch (e) { d = {error: String(e)}; }
+  try { d = await api('/api/chart', {settings: JSON.parse(LASTRUN || JSON.stringify(S)), date: T.date, side: T.side, expiry: T.expiry, in: T.in, out: T.out, entry: T.entry, exit: T.exit, case: T.case, legs: T.legs, slh: T.slh, sl0: T.sl0}); } catch (e) { d = {error: String(e)}; }
   loading.remove();
   if (d.error) { ov.append(h('div', {class: 'warn', style: 'margin:10px'}, 'চার্ট আনা যায়নি: ' + d.error)); return; }
   const t0 = d.spot[0].t, t1 = t0 + 375 * 60, full = t1 - t0, base = d.base * 60, tfs = d.tf * 60;
@@ -808,7 +825,7 @@ async function openChart(i) {
       (d.panes || []).forEach((p, k) => list.push(['sp' + k, 110, {title: p.name, step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
     }
     if (v !== 'spot' && d.prem.length) {
-      list.push(['prem', Hm, {title: 'প্রিমিয়াম ' + T.side.replace(/^BUY |^SELL /, '') + (d.pmode ? ' · ' + d.tf + 'm সিগন্যাল' : ''), bars: d.prem, step: base, lstep: tfs, lines: lines(d.pov, 'p:'), hlines: d.lines, zone, bands, marks: d.marks.prem.map(m => Object.assign({win}, m))}]);
+      list.push(['prem', Hm, {title: 'প্রিমিয়াম ' + T.side.replace(/^BUY |^SELL /, '') + (d.pmode ? ' · ' + d.tf + 'm সিগন্যাল' : ''), bars: d.prem, step: base, lstep: tfs, lines: lines(d.pov, 'p:'), hlines: d.lines, steps: stepSL(d, mIn, mOut), zone, bands, marks: d.marks.prem.map(m => Object.assign({win}, m))}]);
       (d.ppan || []).forEach((p, k) => list.push(['pp' + k, 110, {title: p.name + ' (প্রিমিয়াম)', step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
     }
     if (v !== 'spot' && !d.prem.length) box.append(h('div', {class: 'warn', style: 'margin:10px'}, 'এই কন্ট্র্যাক্টের প্রিমিয়াম ডেটা পাওয়া যায়নি।'));
@@ -1092,6 +1109,179 @@ function renderData() {
     .forEach(([t, d]) => root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%'}, h('b', {}, t), h('span', {class: 'pill soon'}, 'শীঘ্রই')), h('div', {class: 'note', style: 'flex:1 1 100%'}, d)))));
 }
 
+
+
+/* ---------- 🧩 Option Selling Lab (Sensibull-ধাঁচ) ---------- */
+let SELL = null, SELLR = null, SELLP = null, SELLW = {spot: 0, iv: 0, day: 0};
+function sellLoad() {
+  if (SELL) return;
+  try { SELL = JSON.parse(localStorage.getItem('gb_sell') || 'null'); } catch (e) {}
+  if (!SELL || !SELL.legs) SELL = JSON.parse(JSON.stringify(META.sell.defaults));
+  for (const k of ['entry', 'exit', 'rules', 'size', 'margin', 'general']) SELL[k] = Object.assign({}, META.sell.defaults[k], SELL[k] || {});
+}
+function sellSave() { try { localStorage.setItem('gb_sell', JSON.stringify(SELL)); } catch (e) {} }
+function sNum(o, k, step, w) {
+  const i = h('input', {type: 'number', inputmode: 'decimal', step: step || 'any', value: o[k], style: w ? 'width:' + w : ''});
+  i.addEventListener('change', () => { const v = parseFloat(i.value); o[k] = isFinite(v) ? v : 0; sellSave(); }); return i;
+}
+function sTxt(o, k) { const i = h('input', {type: 'text', value: o[k]}); i.addEventListener('change', () => { o[k] = i.value; sellSave(); }); return i; }
+function sChk(o, k, lb) { const i = h('input', {type: 'checkbox'}); i.checked = !!o[k]; i.addEventListener('change', () => { o[k] = i.checked; sellSave(); }); return h('label', {class: 'f', style: 'flex-direction:row;gap:6px;align-items:center'}, i, h('span', {}, lb)); }
+function sSel(o, k, opts, cb) { const s = h('select', {}, ...opts.map(([v, t]) => h('option', {value: v}, t))); s.value = o[k]; s.addEventListener('change', () => { o[k] = (typeof opts[0][0] === 'number') ? parseInt(s.value) : s.value; sellSave(); if (cb) cb(); }); return s; }
+
+function renderSell() {
+  sellLoad();
+  const root = $('#t-sell'); root.innerHTML = '';
+  const T = META.sell.templates;
+  root.append(h('div', {class: 'h2'}, '🧩 Option Selling Lab'));
+  root.append(h('div', {class: 'note'}, 'মাল্টি-লেগ বাস্কেট (Straddle, Strangle, Iron Condor…) ব্যাকটেস্ট, Black-Scholes Greeks/IV ও Payoff। এখনকার সংস্করণ ইন্ট্রাডে (দিনের শেষে স্কোয়ার-অফ)। এটা Strategy ট্যাবের বায়িং-ইঞ্জিন থেকে আলাদা, তবে একই ডেটা ও খরচ-মডেল ব্যবহার করে।'));
+  const ts = h('select', {}, ...Object.entries(T).map(([k, v]) => h('option', {value: k}, v.name + ' — ' + v.view))); ts.value = SELL.template;
+  const tdesc = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (T[SELL.template] || {}).desc || '');
+  ts.addEventListener('change', () => { SELL.template = ts.value; SELL.legs = JSON.parse(JSON.stringify(T[ts.value].legs)); SELL.name = T[ts.value].name + ' ' + SELL.entry.time; sellSave(); SELLP = null; renderSell(); });
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('টেমপ্লেট (এক-ক্লিকে)', ts), F('নাম', sTxt(SELL, 'name')), tdesc)));
+  /* লেগ */
+  root.append(h('h3', {}, 'লেগ (প্রতিটি আলাদা SL)'));
+  const lw = h('div'); root.append(lw);
+  const drawLegs = () => {
+    lw.innerHTML = '';
+    SELL.legs.forEach((lg, i) => {
+      lw.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'gap:6px'},
+        sSel(lg, 'act', [['SELL', 'SELL'], ['BUY', 'BUY']]), sSel(lg, 'opt', [['CE', 'CE'], ['PE', 'PE']]),
+        sSel(lg.strike, 'mode', [['atm', 'ATM ± স্ট্রাইক-সংখ্যা'], ['pts', 'ATM ± পয়েন্ট'], ['prem', 'প্রিমিয়াম ≈ ₹'], ['delta', 'ডেল্টা ≈ (০.২০)']]),
+        F('মান', sNum(lg.strike, 'val', 'any', '84px')), F('লট', sNum(lg, 'lots', 1, '60px')), F('লেগ SL %', sNum(lg, 'sl', 1, '64px')), F('লেগ TP %', sNum(lg, 'tp', 1, '64px')),
+        sSel(lg, 'role', [['core', 'মূল'], ['hedge', 'হেজ']]), sSel(lg, 'exp', [[0, 'কাছের এক্সপায়ারি'], [1, 'পরের এক্সপায়ারি']]),
+        h('button', {class: 'btn s', on: {click: () => { SELL.legs.splice(i, 1); sellSave(); drawLegs(); }}}, '✕'))));
+    });
+  };
+  drawLegs();
+  root.append(h('button', {class: 'btn s', on: {click: () => { SELL.legs.push({act: 'SELL', opt: 'CE', strike: {mode: 'atm', val: 0}, lots: 1, sl: 30, tp: 0, role: 'core', exp: 0}); sellSave(); drawLegs(); }}}, '＋ লেগ যোগ'));
+  /* এন্ট্রি / এক্সিট */
+  const E = SELL.entry, X = SELL.exit, R = SELL.rules, Z = SELL.size, M = SELL.margin, G = SELL.general;
+  root.append(h('h3', {}, 'এন্ট্রি'));
+  const dw = ['সোম', 'মঙ্গল', 'বুধ', 'বৃহ', 'শুক্র'].map((n, i) => { const c = h('input', {type: 'checkbox'}); c.checked = E.dows.includes(i); c.addEventListener('change', () => { E.dows = E.dows.filter(x => x !== i); if (c.checked) E.dows.push(i); sellSave(); }); return h('label', {class: 'f', style: 'flex-direction:row;gap:4px;align-items:center'}, c, h('span', {}, n)); });
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('এন্ট্রি সময় (HH:MM)', sTxt(E, 'time')), F('ন্যূনতম DTE', sNum(E, 'min_dte', 1)), F('সর্বোচ্চ DTE', sNum(E, 'max_dte', 1)),
+    F('IVP ন্যূনতম % (০=বন্ধ)', sNum(E, 'ivp_min', 1)), F('IVP সর্বোচ্চ % (১০০=বন্ধ)', sNum(E, 'ivp_max', 1)), F('গ্যাপ > % হলে বাদ (০=বন্ধ)', sNum(E, 'gap_max', 'any')),
+    h('div', {style: 'display:flex;gap:8px;flex-wrap:wrap;flex:1 1 100%'}, ...dw),
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'IVP = এন্ট্রি-সময়ের ATM IV গত ≤৬০ দিনের তুলনায় কত শতাংশ ওপরে (Black-Scholes থেকে নিজে বের করা)। সেলিংয়ে IVP>৬০ ফিল্টার জনপ্রিয়।'))));
+  root.append(h('h3', {}, 'বাস্কেট এক্সিট (১ লটের জন্য ₹; লট বাড়লে গুণ হবে)'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, F('স্কোয়ার-অফ সময়', sTxt(X, 'time')), F('Basket SL ₹ (০=নেই)', sNum(X, 'basket_sl', 100)), F('Basket TP ₹', sNum(X, 'basket_tp', 100)),
+    F('Lock: লাভ ছুঁলে ₹', sNum(X, 'lock_at', 100)), F('Lock: এই লাভ রক্ষা ₹', sNum(X, 'lock_to', 100)), F('Trail: প্রতি +₹', sNum(X, 'trail_step', 100)), F('Trail: লক বাড়বে ₹', sNum(X, 'trail_lock', 100)))));
+  root.append(h('h3', {}, 'অ্যাডজাস্টমেন্ট ও ঝুঁকি-নিয়ম'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'},
+    sChk(R, 'sl_to_cost', 'Move SL to Cost: একদিকে SL লাগলে অন্য সেল-লেগের SL এন্ট্রি-দামে'),
+    F('রি-এন্ট্রি সর্বোচ্চ বার', sNum(R, 'reentry_max', 1)), F('রি-এন্ট্রি মোড', sSel(R, 'reentry_mode', [['asap', 'ASAP (পরের বারেই)'], ['recost', 'Re-Cost (দাম এন্ট্রিতে ফিরলে)']])),
+    sChk(R, 'adjust', 'Auto-Adjust: লাভজনক লেগ রোল-ইন'), F('প্রিমিয়াম অনুপাত ≥', sNum(R, 'adj_ratio', 0.1)), F('|Net Δ| > (০=বন্ধ)', sNum(R, 'adj_delta', 0.05)), F('সর্বোচ্চ অ্যাডজাস্ট', sNum(R, 'adj_max', 1)),
+    sChk(R, 'auto_hedge', 'Auto-Hedge: হেজ না থাকলে সস্তা OTM বাই নিজে যোগ'), F('হেজ প্রিমিয়াম ≈ ₹', sNum(R, 'hedge_prem', 1)))));
+  root.append(h('h3', {}, 'সাইজিং, মার্জিন ও সাধারণ'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'},
+    F('সাইজিং', sSel(Z, 'mode', [['fixed', 'ফিক্সড লট'], ['risk', 'মূলধনের % ঝুঁকি (Basket SL ধরে)']])), F('লট', sNum(Z, 'lots', 1)), F('ঝুঁকি % মূলধনের', sNum(Z, 'risk_pct', 0.1)),
+    F('নেকেড মার্জিন % (আনুমানিক)', sNum(M, 'pct', 0.5)), F('মূলধন ₹', sNum(G, 'capital', 10000)), F('স্লিপেজ (পয়েন্ট)', sNum(G, 'slip', 0.1)), F('ব্রোকারেজ/অর্ডার ₹', sNum(G, 'brokerage', 1)), F('চার্জ % (সেল-টার্নওভারে)', sNum(G, 'charges_pct', 0.01)),
+    F('তারিখ থেকে (YYYY-MM-DD)', sTxt(G, 'from')), F('তারিখ পর্যন্ত', sTxt(G, 'to')), F('Train %', sNum(G, 'split', 5)),
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'মার্জিন একটি আনুমানিক মডেল (SPAN ঠিক নয়): নেকেড সেলিং = ' + M.pct + '% × নোশনাল, হেজড হলে স্প্রেডের সর্বোচ্চ লসে সীমাবদ্ধ। আসল মার্জিনের জন্য ব্রোকারের ক্যালকুলেটর দেখুন; ROM তারই ভিত্তিতে।'))));
+  /* অ্যাকশন */
+  const pd = h('input', {type: 'text', placeholder: 'YYYY-MM-DD (খালি = শেষ দিন)', style: 'width:170px'});
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'},
+    h('button', {class: 'btn g', on: {click: async () => { const r = await runJob({kind: 'sell', settings: SELL}, 'সেলিং ব্যাকটেস্ট'); if (r) { SELLR = r; drawSellRes(); } }}}, '▶ সেলিং ব্যাকটেস্ট'),
+    h('button', {class: 'btn p', on: {click: async () => { const r = await runJob({kind: 'sellprev', settings: SELL, opts: {date: pd.value.trim()}}, 'Payoff'); if (r) { SELLP = r; SELLW = {spot: 0, iv: 0, day: 0}; drawPayoff(); } }}}, '📉 Payoff / Greeks দেখুন'), pd)));
+  root.append(h('div', {id: 'sell_pay'}), h('div', {id: 'sell_res'}));
+  if (SELLP) drawPayoff();
+  if (SELLR) drawSellRes();
+}
+
+/* ---- JS Black-Scholes ---- */
+function jN(x) { const t = 1 / (1 + 0.2316419 * Math.abs(x)), p = t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429)))), c = 1 - Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI) * p; return x >= 0 ? c : 1 - c; }
+function jP(S, K, T, s, typ, r) {
+  if (T <= 1e-6) return Math.max(typ === 'CE' ? S - K : K - S, 0);
+  const q = s * Math.sqrt(T), d1 = (Math.log(S / K) + (r + s * s / 2) * T) / q, d2 = d1 - q;
+  return typ === 'CE' ? S * jN(d1) - K * Math.exp(-r * T) * jN(d2) : K * Math.exp(-r * T) * jN(-d2) - S * jN(-d1);
+}
+function jG(S, K, T, s, typ, r) {
+  T = Math.max(T, 1e-6); const q = s * Math.sqrt(T), d1 = (Math.log(S / K) + (r + s * s / 2) * T) / q, d2 = d1 - q, pdf = Math.exp(-d1 * d1 / 2) / Math.sqrt(2 * Math.PI);
+  const delta = typ === 'CE' ? jN(d1) : jN(d1) - 1, vega = S * pdf * Math.sqrt(T) / 100;
+  let th = -S * pdf * s / (2 * Math.sqrt(T)); th += typ === 'CE' ? -r * K * Math.exp(-r * T) * jN(d2) : r * K * Math.exp(-r * T) * jN(-d2);
+  return {delta, vega, theta: th / 365};
+}
+function payoffCalc(P, w) {
+  const sg = l => l.act === 'BUY' ? 1 : -1, S0 = P.spot, Tt = Math.max(P.T_days - w.day, 0) / 365, iv0 = P.atm_iv / 100;
+  const lo = S0 * 0.82, hi = S0 * 1.18, N = 260, xs = [], ex = [], t0 = [];
+  for (let i = 0; i <= N; i++) {
+    const S = lo + (hi - lo) * i / N; xs.push(S); let a = 0, b = 0;
+    P.legs.forEach(l => {
+      const iv = Math.max(((l.iv || P.atm_iv) / 100) * (1 + w.iv / 100), 0.02), q = l.qty * sg(l), intr = Math.max(l.opt === 'CE' ? S - l.strike : l.strike - S, 0);
+      a += q * (intr - l.premium);
+      const Tl = Math.max((l.T_days - w.day), 0) / 365; b += q * (jP(S, l.strike, Tl, iv, l.opt, P.rf) - l.premium);
+    });
+    ex.push(a); t0.push(b);
+  }
+  const mx = Math.max(...ex), mn = Math.min(...ex);
+  const slopeL = ex[1] - ex[0], slopeR = ex[N] - ex[N - 1];
+  const be = []; for (let i = 1; i <= N; i++) if ((ex[i - 1] < 0) !== (ex[i] < 0)) be.push(xs[i - 1] + (xs[i] - xs[i - 1]) * (0 - ex[i - 1]) / (ex[i] - ex[i - 1]));
+  // POP: লগ-নরমাল (শূন্য ড্রিফট) ও বর্তমান IV
+  const sd = iv0 * Math.sqrt(P.T_days / 365); let pop = 0, tot = 0;
+  for (let i = 0; i <= N; i++) { const z = (Math.log(xs[i] / S0) + sd * sd / 2) / sd, wt = Math.exp(-z * z / 2) / xs[i]; tot += wt; if (ex[i] > 0) pop += wt; }
+  const Sx = S0 * (1 + w.spot / 100); let nd = 0, nt = 0, nv = 0, ng = 0;
+  P.legs.forEach(l => { const iv = Math.max(((l.iv || P.atm_iv) / 100) * (1 + w.iv / 100), 0.02), g = jG(Sx, l.strike, Math.max(l.T_days - w.day, 0) / 365, iv, l.opt, P.rf), q = l.qty * sg(l); nd += g.delta * q; nt += g.theta * q; nv += g.vega * q; });
+  let now = 0; P.legs.forEach(l => { const iv = Math.max(((l.iv || P.atm_iv) / 100) * (1 + w.iv / 100), 0.02), q = l.qty * sg(l); now += q * (jP(Sx, l.strike, Math.max(l.T_days - w.day, 0) / 365, iv, l.opt, P.rf) - l.premium); });
+  return {xs, ex, t0, mx, mn, unlimLoss: slopeL < -1e-6 && ex[0] < 0 || slopeR < -1e-6, unlimProfit: slopeL < -1e-6 && ex[0] > 0 || slopeR > 1e-6, be, pop: 100 * pop / tot, sd, nd, nt, nv, now, Sx};
+}
+function drawPayoff() {
+  const box = $('#sell_pay'); if (!box) return; box.innerHTML = ''; const P = SELLP; if (!P) return;
+  box.append(h('h3', {}, '📉 Payoff — ' + P.date + ' এন্ট্রি, এক্সপায়ারি ' + P.expiry + ' (' + P.T_days + ' দিন বাকি)'));
+  box.append(tbl(['লেগ', 'স্ট্রাইক', 'লট/Qty', 'প্রিমিয়াম', 'IV%', 'Δ', 'Θ/দিন', 'ν'], P.legs.map(l => [l.act + ' ' + l.opt + (l.role === 'hedge' ? ' (হেজ)' : ''), l.strike, l.lots + ' / ' + l.qty, '₹' + l.premium, l.iv == null ? '–' : l.iv, l.delta, l.theta, l.vega])));
+  const cv = h('canvas', {style: 'width:100%;height:260px;background:#10151d;border-radius:10px;touch-action:none'}); box.append(cv);
+  const out = h('div'); const mk = (lb, key, mn, mx, st) => { const i = h('input', {type: 'range', min: mn, max: mx, step: st, value: SELLW[key], style: 'width:100%'}); const sp = h('span', {}, SELLW[key]); i.addEventListener('input', () => { SELLW[key] = parseFloat(i.value); sp.textContent = SELLW[key]; redraw(); }); return h('label', {class: 'f', style: 'flex:1 1 100%'}, h('span', {}, lb + ': ', sp), i); };
+  box.append(h('div', {class: 'card'}, h('div', {class: 'body'}, mk('স্পট পরিবর্তন %', 'spot', -5, 5, 0.1), mk('IV পরিবর্তন % (আপেক্ষিক)', 'iv', -20, 20, 1), mk('দিন এগোনো (DTE ক্ষয়)', 'day', 0, Math.max(0, Math.floor(P.T_days)), 0.25))));
+  box.append(out);
+  function redraw() {
+    const C = payoffCalc(P, SELLW), W = cv.clientWidth || 340, H = 260, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+    const L = 8, R = 8, Tp = 10, B = 22, all = C.ex.concat(C.t0), mn = Math.min(...all, 0), mx = Math.max(...all, 0), x0 = C.xs[0], x1 = C.xs[C.xs.length - 1];
+    const X = v => L + (W - L - R) * (v - x0) / (x1 - x0), Y = v => Tp + (H - Tp - B) * (1 - (v - mn) / Math.max(mx - mn, 1));
+    g.fillStyle = 'rgba(86,182,194,.10)'; g.fillRect(X(P.spot - 2 * C.sd * P.spot), Tp, X(P.spot + 2 * C.sd * P.spot) - X(P.spot - 2 * C.sd * P.spot), H - Tp - B);
+    g.fillStyle = 'rgba(86,182,194,.16)'; g.fillRect(X(P.spot - C.sd * P.spot), Tp, X(P.spot + C.sd * P.spot) - X(P.spot - C.sd * P.spot), H - Tp - B);
+    g.strokeStyle = '#2f4a3b'; g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(W - R, Y(0)); g.stroke();
+    g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'center';
+    for (let k = 0; k <= 4; k++) { const v = x0 + (x1 - x0) * k / 4; g.fillText(Math.round(v), X(v), H - 8); }
+    g.textAlign = 'left'; g.fillText(Math.round(mx).toLocaleString('en-IN'), L + 2, Tp + 8); g.fillText(Math.round(mn).toLocaleString('en-IN'), L + 2, H - B - 3);
+    const line = (arr, col, dash, w) => { g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash); g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(X(C.xs[i]), Y(v)) : g.moveTo(X(C.xs[i]), Y(v))); g.stroke(); g.setLineDash([]); };
+    line(C.ex, '#26c281', [], 2); line(C.t0, '#f1c40f', [5, 3], 2);
+    g.strokeStyle = '#8b96a8'; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(P.spot), Tp); g.lineTo(X(P.spot), H - B); g.stroke(); g.setLineDash([]);
+    g.strokeStyle = '#ff9f43'; g.beginPath(); g.moveTo(X(C.Sx), Tp); g.lineTo(X(C.Sx), H - B); g.stroke();
+    out.innerHTML = '';
+    const fm = v => inr(v), lim = (v, un) => un ? 'অসীম (হেজ নেই)' : fm(v);
+    out.append(tbl(['পে-অফ সারাংশ', ''], [
+      ['সর্বোচ্চ লাভ (এক্সপায়ারি)', lim(C.mx, C.unlimProfit)], ['সর্বোচ্চ লস (এক্সপায়ারি)', lim(C.mn, C.unlimLoss)],
+      ['ব্রেকইভেন', C.be.length ? C.be.map(v => Math.round(v)).join(' / ') : '–'], ['লাভের সম্ভাবনা (POP, IV-ভিত্তিক)', C.pop.toFixed(0) + '%'],
+      ['±1SD / ±2SD রেঞ্জ', Math.round(P.spot * (1 - C.sd)) + '–' + Math.round(P.spot * (1 + C.sd)) + ' / ' + Math.round(P.spot * (1 - 2 * C.sd)) + '–' + Math.round(P.spot * (1 + 2 * C.sd))],
+      ['এখনকার (T+0) P&L এই স্লাইডারে', pn(C.now)], ['Net Δ (qty)', C.nd.toFixed(1)], ['Net Θ প্রতিদিন', pn(C.nt)], ['Net ν প্রতি ১ vol-pt', pn(C.nv)], ['আনুমানিক মার্জিন', inr(P.margin)]]));
+    out.append(h('div', {class: 'note'}, 'সবুজ কঠিন = এক্সপায়ারি পে-অফ; হলুদ ড্যাশ = T+0 (Black-Scholes); নীলচে ব্যান্ড = ±1SD/±2SD; ধূসর রেখা = এন্ট্রির স্পট, কমলা = স্লাইডারের স্পট। POP/IV কেবল মডেল-অনুমান, ভবিষ্যদ্বাণী নয়।'));
+  }
+  setTimeout(redraw, 0);
+}
+function drawSellRes() {
+  const box = $('#sell_res'); if (!box) return; box.innerHTML = ''; const r = SELLR, A = r.stats.all, T = r.stats.train, E = r.stats.test;
+  if (!A.n) { box.append(h('div', {class: 'warn'}, 'কোনো ট্রেড হয়নি। বাদ পড়া: ' + JSON.stringify(r.meta.skipped))); return; }
+  const kp = (l, v, c) => h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v));
+  box.append(h('h3', {}, 'ফল — ' + r.meta.from + ' → ' + r.meta.to));
+  const M = r.margin || {};
+  box.append(h('div', {class: 'kpis'}, kp('নেট P&L', inr(A.net), cls(A.net)), kp('ট্রেড-দিন', A.n), kp('Win %', A.win.toFixed(1) + '%'), kp('Profit Factor', f2(A.pf)),
+    kp('Max DD', inr(A.dd) + ' (' + A.dd_pct.toFixed(1) + '%)', 'neg'), kp('Recovery', f2(A.rec)), kp('Sharpe / Sortino', f2(r.sharpe || 0) + ' / ' + f2(r.sortino || 0)), kp('মোট খরচ', inr(A.costs)),
+    kp('গড় মার্জিন (আনু.)', inr(M.avg || 0)), kp('ROM মোট / বার্ষিক', (M.rom_total || 0).toFixed(1) + '% / ' + (M.rom_annual || 0).toFixed(1) + '%'), kp('Max DD ÷ মার্জিন', (M.dd_pct_margin || 0).toFixed(1) + '%', 'neg')));
+  if (A.n < 60) box.append(h('div', {class: 'warn'}, 'ট্রেড মাত্র ' + A.n + 'টি — সেলিংয়ে কম নমুনায় বড় ট্রেইল-লস লুকিয়ে থাকে; ফলে অতিরিক্ত ভরসা করবেন না।'));
+  box.append(h('canvas', {id: 'sell_eq', style: 'width:100%;height:170px'}));
+  if (r.meta.split_date) box.append(tbl(['', 'Train', 'Test'], [['ট্রেড', T.n, E.n], ['নেট', pn(T.net), pn(E.net)], ['PF', f2(T.pf), f2(E.pf)], ['Win%', T.win.toFixed(0) + '%', E.win.toFixed(0) + '%'], ['DD', inr(T.dd), inr(E.dd)]]));
+  const g2 = (t, a) => { box.append(h('h3', {}, t)); box.append(tbl(['', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'গড়/ট্রেড'], a.map(x => [x.k, x.n, x.win.toFixed(0) + '%', pn(x.net), f2(x.pf), pn(x.exp)]))); };
+  g2('এক্সিটের কারণ', r.by_reason); g2('সপ্তাহের দিন', r.by_dow); g2('DTE', r.by_dte);
+  box.append(h('h3', {}, 'মাস অনুযায়ী')); box.append(tbl(['মাস', 'ট্রেড', 'Win%', 'নেট ₹', 'DD'], r.monthly.map(x => [x.k, x.n, x.win.toFixed(0) + '%', pn(x.net), inr(x.dd)])));
+  box.append(h('h3', {}, 'ট্রেড তালিকা (ট্যাপ করলে লেগ-বিবরণ)'));
+  const rows = r.trades.map((t, k) => '<tr data-i="' + k + '" style="cursor:pointer"><td>' + (k + 1) + '</td><td>' + t.date + '</td><td>' + t.in + '→' + t.out + '</td><td>' + t.reason + '</td><td class="' + cls(t.net) + '">' + inr(t.net) + '</td><td>' + (t.rom == null ? '' : t.rom + '%') + '</td></tr>').join('');
+  const det = h('div'); const tb = h('div', {class: 'scroll', style: 'max-height:420px', html: '<table><tr><th>#</th><th>তারিখ</th><th>সময়</th><th>কারণ</th><th>নেট</th><th>ROM</th></tr>' + rows + '</table>'});
+  tb.addEventListener('click', e => { const tr = e.target.closest('tr[data-i]'); if (!tr) return; const t = r.trades[+tr.dataset.i]; det.innerHTML = '';
+    det.append(h('h3', {}, t.date + ' · স্পট ' + t.spot + ' · IV ' + (t.iv == null ? '–' : t.iv + '%') + (t.ivp == null ? '' : ' (IVP ' + t.ivp + ')')));
+    det.append(tbl(['লেগ', 'স্ট্রাইক', 'Qty', 'ইন', 'আউট', 'এন্ট্রি', 'এক্সিট', 'P&L', 'কারণ'], t.legs.map(l => [l.act + ' ' + l.opt + (l.role === 'hedge' ? '·H' : ''), l.strike, l.qty, l.in, l.out, l.entry, l.exit, pn(l.pnl), l.why])));
+    det.append(h('div', {class: 'note', html: 'পিক MTM ' + inr(t.mtm_peak) + ' · সর্বনিম্ন MTM ' + inr(t.mtm_low) + ' · মার্জিন ' + inr(t.margin) + (t.events.length ? '<br>' + t.events.join('<br>') : '')})); det.scrollIntoView({behavior: 'smooth', block: 'nearest'}); });
+  box.append(tb, det);
+  setTimeout(() => drawLine('sell_eq', r.equity, '#2ee27d', true), 0);
+}
 
 /* ---------- 🧠 AI Advisor ---------- */
 function drawAI2(root, A) {
@@ -1382,10 +1572,11 @@ async function loadPaperList() {
 /* ---------- ট্যাব ---------- */
 function showTab(t) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-  for (const k of ['build', 'res', 'tune', 'ai', 'paper', 'pre', 'data']) $('#t-' + k).hidden = k !== t;
+  for (const k of ['build', 'res', 'tune', 'ai', 'sell', 'paper', 'pre', 'data']) $('#t-' + k).hidden = k !== t;
   if (t === 'res') drawEq();
   if (t === 'data') renderData();
   if (t === 'ai') renderAI();
+  if (t === 'sell') renderSell();
   if (t === 'paper') { renderPaper(); paperPoll(); }
   window.scrollTo(0, 0);
 }
