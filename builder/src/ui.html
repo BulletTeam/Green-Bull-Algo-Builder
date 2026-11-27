@@ -1033,6 +1033,41 @@ function renderData() {
 
 
 /* ---------- 🧠 AI Advisor ---------- */
+function drawAI2(root, A) {
+  const sg = v => (v > 0 ? '+' : '') + inr(v).replace('₹', '₹');
+  const pc = v => '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + (v >= 0 ? '+' : '−') + '₹' + Math.abs(Math.round(v)).toLocaleString('en-IN') + '</span>';
+  const V = A.validation, lv = {pass: '✅ টেকসই', keep: '👌 বদল দরকার নেই', warn: '⚠️ সতর্কতা', fail: '❌ যাচাইয়ে টেকেনি'}[V.level] || V.level;
+  root.append(h('h3', {}, '🔬 v2 ফল — ' + A.case + ' (' + A.n_base + ' ট্রেড, ' + A.K + ' সময়-ভাগ, ' + A.runs + ' রান, ' + A.secs.toFixed(0) + 's)'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%', html: '<b>' + lv + '</b><br>' + V.msgs.map(m => '• ' + m).join('<br>')}))));
+  const row = (n, x) => [n, x.all.n, pc(x.all.net), x.all.pf.toFixed(2), pc(x.train.net), pc(x.test.net), (x.seg_pos * 100).toFixed(0) + '%'];
+  root.append(h('h3', {}, 'আগে বনাম পরে'));
+  root.append(tbl(['', 'ট্রেড', 'নেট', 'PF', 'TRAIN', 'TEST', 'লাভজনক সময়-ভাগ'], [row('বর্তমান', A.base), row('শুধু এক্সিট টিউন', A.exit_best), row('এক্সিট + ফিল্টার (চূড়ান্ত)', A.final)]));
+  if (A.ablation.length) {
+    root.append(h('h3', {}, 'রুল অ্যাব্লেশন — শর্তটি বন্ধ করলে কী হয়'));
+    root.append(tbl(['শর্ত', 'ট্রেড', 'নেট Δ', 'TRAIN Δ', 'TEST Δ', 'PF'], A.ablation.map(a => [a.rule, a.n, pc(a.d_net), pc(a.d_train), pc(a.d_test), a.pf.toFixed(2)])));
+    root.append(h('div', {class: 'note'}, 'Δ ঋণাত্মক = শর্তটি লাভ বাড়াচ্ছে (রাখুন); Δ ধনাত্মক = শর্ত বন্ধ করলে ভালো হতো (শর্তটি ক্ষতিকর/অকেজো হতে পারে)।'));
+  }
+  if (A.filters.length) {
+    root.append(h('h3', {}, 'ফিল্টার মাইনিং (আসল ইঞ্জিনে যাচাই)'));
+    root.append(tbl(['অতিরিক্ত শর্ত', 'ট্রেড', 'TRAIN Δ', 'TEST Δ', 'রায়'], A.filters.map(f => [f.rule, f.n, pc(f.d_train), pc(f.d_test), f.chosen ? '✔ নির্বাচিত' : (f.ok ? '✓ ভালো' : '✗')])));
+  }
+  const W = A.wfo;
+  root.append(h('h3', {}, 'রোলিং Walk-Forward (অদেখা সময়ে পরীক্ষা)'));
+  root.append(tbl(['ট্রেন', 'টেস্ট', 'OOS নেট (টিউন)', 'OOS নেট (বর্তমান)', 'ট্রেড'], W.windows.map(w => [w.train, w.test, pc(w.net_oos), pc(w.net_base), w.n_oos])));
+  root.append(h('div', {class: 'note', html: 'মোট OOS: <b>' + pc(W.oos.net) + '</b> (PF ' + W.oos.pf.toFixed(2) + ') বনাম বর্তমান <b>' + pc(W.base.net) + '</b> | WFE ' + (W.wfe * 100).toFixed(0) + '%'}));
+  if (A.changes.length) {
+    root.append(h('h3', {}, 'সাজেশন'));
+    root.append(tbl(['প্যারামিটার', 'এখন', 'সাজেশন'], A.changes.map(c => [c.label, JSON.stringify(c.from), '<b>' + JSON.stringify(c.to) + '</b>'])));
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('button', {class: 'btn p', on: {click: () => {
+      if (!confirm('v2 সাজেশন Strategy ট্যাবে বসানো হবে। এগিয়ে যাবেন?')) return;
+      A.apply.forEach(x => setp(x.path, x.value));
+      renderBuild(); showTab('build'); $('#status').textContent = '✓ v2 সাজেশন প্রয়োগ হয়েছে — Run দিয়ে দেখুন';
+    }}}, '✔ v2 সাজেশন প্রয়োগ করুন'))));
+  }
+  (A.warnings || []).forEach(w => root.append(h('div', {class: 'note'}, '⚠ ' + w)));
+}
+
+let AIR2 = null;
 let AIR = null, AIOPT = {mode: 'full', case: 0, reqs: []};
 function renderAI() {
   const root = $('#t-ai'); root.innerHTML = '';
@@ -1050,6 +1085,13 @@ function renderAI() {
       if (r) { AIR = r; renderAI(); }
     }}}, '🧠 বিশ্লেষণ চালান'),
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'সময় লাগে: প্রায় ৪০–১৭০টি পূর্ণ ব্যাকটেস্ট। ফোনে কয়েক মিনিট হতে পারে; ডেটা বেশি হলে আগে Data ট্যাবে তারিখ-সীমা ছোট করুন।'))));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'},
+    h('button', {class: 'btn p', on: {click: async () => {
+      const r = await runJob({kind: 'advise2', settings: S, opts: {case: AIOPT.case}}, 'AI v2 গভীর বিশ্লেষণ');
+      if (r) { AIR2 = r; renderAI(); }
+    }}}, '🔬 গভীর বিশ্লেষণ (v2)'),
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'রুল অ্যাব্লেশন (কোন এন্ট্রি-শর্ত আসলে কাজ করছে), ফিল্টার মাইনিং, স্মার্ট সার্চ ও রোলিং Walk-Forward। কমপক্ষে ~৫০ ট্রেড দরকার।'))));
+  if (AIR2) drawAI2(root, AIR2);
   /* ---- অনুরোধ বাক্স ---- */
   const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
   const send = async txt => {
