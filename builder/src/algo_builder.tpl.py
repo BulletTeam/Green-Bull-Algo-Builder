@@ -2518,7 +2518,7 @@ LIVE_KEYS = {"BN": "NSE_INDEX|Nifty Bank", "N50": "NSE_INDEX|Nifty 50", "FIN": "
 
 
 def ist_now():
-    n = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
+    n = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(hours=5, minutes=30)
     return int((n.date().toordinal() - 719163) * 1440 + n.hour * 60 + n.minute), n.second
 
 
@@ -2532,7 +2532,7 @@ def _cmin(ts):
 
 def _exp_date(x):
     if isinstance(x, (int, float)):
-        return (dt.datetime.utcfromtimestamp(x / 1000.0) + dt.timedelta(hours=5, minutes=30)).date()
+        return (dt.datetime.fromtimestamp(x / 1000.0, dt.timezone.utc).replace(tzinfo=None) + dt.timedelta(hours=5, minutes=30)).date()
     return dt.date.fromisoformat(str(x)[:10])
 
 
@@ -2672,12 +2672,20 @@ class LiveState:
             for typ in ("CE", "PE"):
                 if (typ, strikes[j]) in self.contracts:
                     self.fetched.add((typ, strikes[j]))
-        for k in sorted(self.fetched):
+        from concurrent.futures import ThreadPoolExecutor
+        ks = sorted(self.fetched)
+
+        def one(k):
+            if PAPER["stop"]:
+                return k, 0, []
             st, r = self.feed.option_today(self.contracts[k][0])
-            if st == 200:
-                self.opt[k] = [x for x in r if x[0] // 1440 == today]
-            else:
-                self.last_err = "অপশন %s %s: status %s" % (k[0], k[1], st)
+            return k, st, r
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for k, st, r in ex.map(one, ks):
+                if st == 200:
+                    self.opt[k] = [x for x in r if x[0] // 1440 == today]
+                elif st:
+                    self.last_err = "অপশন %s %s: status %s" % (k[0], k[1], st)
         return True
 
     def build(self, Dh, now):
@@ -2756,7 +2764,11 @@ def paper_live(sess):
     sq = hm(G["sqoff"])
     sess["msg"] = "লাইভ ফিডের অপেক্ষা…"
     clock = sess.get("_clock") or ist_now
-    sleeper = sess.get("_sleep") or time.sleep
+    def isleep(n):
+        end = time.time() + n
+        while time.time() < end and not PAPER["stop"]:
+            time.sleep(0.25)
+    sleeper = sess.get("_sleep") or isleep
     last_now = -1
     while not PAPER["stop"]:
         now, sec = clock()
@@ -2778,6 +2790,8 @@ def paper_live(sess):
             sleeper(20)
             continue
         sess["feed_secs"] = round(time.time() - t_net, 1)
+        if PAPER["stop"]:
+            break
         if not ok:
             sess["msg"] = "আজকের স্পট ক্যান্ডেল নেই (ছুটি/বাজার বন্ধ?)"
             if mod > sq + 5:

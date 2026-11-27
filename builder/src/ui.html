@@ -344,10 +344,32 @@ function condBlock(ci, part, title, hint) {
   return wrap;
 }
 
+
+const MIR_SWAP = {orbh: 'orbl', orbl: 'orbh', donhi: 'donlo', donlo: 'donhi', bbup: 'bblow', bblow: 'bbup', pdh: 'pdl', pdl: 'pdh', r1: 's1', s1: 'r1', r2: 's2', s2: 'r2', r3: 's3', s3: 'r3', cprt: 'cprb', cprb: 'cprt'};
+const MIR_OP = {cross_above: 'cross_below', cross_below: 'cross_above', above: 'below', below: 'above', rising: 'falling', falling: 'rising'};
+const MIR_NEUTRAL = new Set(['adx', 'atr', 'volume', 'volsma', 'bbw', 'rng', 'body', 'bodyp', 'bodyatr', 'uw', 'lw', 'uwp', 'lwp', 'minsopen', 'cprw', 'orbr', 'gap', 'number']);
+function mirrorCase(c) {
+  const m = JSON.parse(JSON.stringify(c));
+  m.opt = c.opt === 'CE' ? 'PE' : 'CE'; m.name = c.name + ' → ' + m.opt + ' মিরর';
+  const fl = s => {
+    if (MIR_NEUTRAL.has(s.l)) return;
+    s.op = MIR_OP[s.op] || s.op;
+    if (MIR_SWAP[s.l]) s.l = MIR_SWAP[s.l];
+    if (MIR_SWAP[s.r]) s.r = MIR_SWAP[s.r];
+    if (s.l === 'rsi' && s.r === 'number') s.num = Math.round((100 - s.num) * 100) / 100;
+    if (s.l === 'cdir' && s.r === 'number') s.num = -s.num;
+  };
+  (m.entry || []).forEach(fl); (m.exit || []).forEach(fl);
+  return m;
+}
+
 function caseCard(ci) {
   const c = S.cases[ci], p = 'cases.' + ci;
   const body = h('div', {class: 'body'});
-  body.append(F('Case নাম', txtCtl(p + '.name')),
+  body.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:7px;flex-wrap:wrap'},
+    h('button', {class: 'btn s', on: {click: () => { S.cases.splice(ci + 1, 0, JSON.parse(JSON.stringify(c))); S.cases[ci + 1].name += ' copy'; persist(); renderBuild(); $('#status').textContent = '✓ Case কপি হয়েছে (নিচে)'; }}}, '⎘ হুবহু কপি'),
+    h('button', {class: 'btn s', on: {click: () => { S.cases.splice(ci + 1, 0, mirrorCase(c)); persist(); renderBuild(); $('#status').textContent = '✓ ' + (c.opt === 'CE' ? 'PE' : 'CE') + ' মিরর তৈরি — শর্তগুলো চোখে দেখে নিন'; }}}, '🔁 ' + (c.opt === 'CE' ? 'PE' : 'CE') + ' মিরর কপি')),
+    F('Case নাম', txtCtl(p + '.name')),
     FC('চালু', chkCtl(p + '.on')),
     F('Action', selCtl(p + '.action', [['BUY', 'BUY (কেনা)'], ['SELL', 'SELL (বিক্রি)']])),
     F('অপশন', selCtl(p + '.opt', [['CE', 'CE'], ['PE', 'PE']])),
@@ -1142,65 +1164,77 @@ function renderAI() {
 
 
 /* ---------- 📄 Paper (রিপ্লে + লাইভ) ---------- */
-let PP = {mode: 'replay', from: '', to: '', step: 30, delay: 0, band: 3, timer: null, last: null, test: null};
+let PP = {mode: 'replay', from: '', to: '', step: 30, delay: 0, band: 3, timer: null, last: null, test: null, sig: '', run: null, stopping: false};
+function ppRun() { return !!(PP.last && PP.last.running); }
 function paperPoll() {
   clearInterval(PP.timer);
-  PP.timer = setInterval(async () => {
+  const tick = async () => {
     if ($('#t-paper').hidden) { clearInterval(PP.timer); return; }
-    try { const r = await api('/api/paper/status'); PP.last = r.sess; renderPaper(true); if (r.sess && !r.sess.running) clearInterval(PP.timer); } catch (e) {}
-  }, 1500);
+    try {
+      const r = await api('/api/paper/status'); PP.last = r.sess;
+      const rn = ppRun();
+      if (PP.run !== rn) { PP.run = rn; PP.stopping = false; drawPaperForm(); loadPaperList(); }
+      drawPaperStat();
+      if (!rn) clearInterval(PP.timer);
+    } catch (e) {}
+  };
+  PP.timer = setInterval(tick, PP.stopping ? 600 : 1500); tick();
 }
-async function renderPaper(soft) {
-  const root = $('#t-paper');
-  if (!soft) { try { const r = await api('/api/paper/status'); PP.last = r.sess; } catch (e) {} }
-  const P = PP.last;
-  if (soft && root._busy) return;
-  root.innerHTML = '';
-  root.append(h('div', {class: 'h2'}, '📄 Paper Trading'));
-  root.append(h('div', {class: 'note'}, 'আপনার বর্তমান স্ট্র্যাটেজি (Strategy ট্যাবের সেটিংস) একই ব্যাকটেস্ট-কোডে চালিয়ে "এখন পর্যন্ত জানা ডেটা" দিয়ে ট্রেড দেখায়; আসল অর্ডার যায় না। রিপ্লে মোড পুরনো দিনকে লাইভের মতো একটু একটু করে চালায় (ফিড ছাড়াই, এখনই পরীক্ষা করা যায়)। লাইভ মোড Upstox ফিড থেকে আজকের দাম টানে।'));
-  const run = P && P.running;
-  if (!run) {
-    const i = META.info, dEnd = i.spot_to, d0 = new Date(dEnd); d0.setDate(d0.getDate() - 28);
-    if (!PP.from) PP.from = d0.toISOString().slice(0, 10); if (!PP.to) PP.to = dEnd;
-    const ms = h('select', {}, h('option', {value: 'replay'}, '🔁 রিপ্লে (পুরনো দিন)'), h('option', {value: 'live'}, '🟢 লাইভ (আজকের বাজার)')); ms.value = PP.mode;
-    ms.addEventListener('change', () => { PP.mode = ms.value; renderPaper(true); });
-    const box = h('div', {class: 'body'}, F('মোড', ms));
-    if (PP.mode === 'replay') {
-      const a = h('input', {type: 'date', value: PP.from}), b = h('input', {type: 'date', value: PP.to});
-      a.addEventListener('change', () => PP.from = a.value); b.addEventListener('change', () => PP.to = b.value);
-      const sp = h('select', {}, h('option', {value: 0}, 'তাৎক্ষণিক'), h('option', {value: 0.05}, 'দ্রুত'), h('option', {value: 0.4}, 'ধীরে (দেখার মতো)')); sp.value = PP.delay;
-      sp.addEventListener('change', () => PP.delay = parseFloat(sp.value));
-      const stp = h('select', {}, h('option', {value: 30}, 'প্রতি ৩০ মিনিটে (দ্রুত)'), h('option', {value: 15}, 'প্রতি ১৫ মিনিটে'), h('option', {value: 0}, 'প্রতি চার্ট-বারে (ধীর, বিস্তারিত লগ)')); stp.value = PP.step;
-      stp.addEventListener('change', () => PP.step = parseInt(stp.value));
-      box.append(F('শুরু', a), F('শেষ', b), F('টিক-ধাপ', stp), F('গতি', sp));
-    } else {
-      const pv = h('select', {}, h('option', {value: 'upstox'}, 'Upstox'), h('option', {value: 'zerodha', disabled: true}, 'Zerodha (শীঘ্রই)'), h('option', {value: 'angel', disabled: true}, 'Angel One (শীঘ্রই)'), h('option', {value: 'dhan', disabled: true}, 'Dhan (শীঘ্রই)'));
-      const bn = h('input', {type: 'number', value: PP.band, min: 1, max: 8}); bn.addEventListener('change', () => PP.band = parseInt(bn.value) || 3);
-      box.append(F('ব্রোকার ফিড', pv), F('ATM-এর দুই পাশে স্ট্রাইক', bn));
-      box.append(h('button', {class: 'btn s', on: {click: async () => {
-        PP.test = 'চলছে…'; renderPaper(true);
-        try { PP.test = await api('/api/live/test', {inst: (META.info.inst || 'N50')}); } catch (e) { PP.test = {checks: [{name: 'ত্রুটি', ok: false, detail: String(e)}]}; }
-        renderPaper(true);
-      }}}, '🔌 লাইভ কানেকশন টেস্ট'));
-      if (PP.test) box.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0', html: PP.test === 'চলছে…' ? 'টেস্ট চলছে…' : PP.test.checks.map(c => (c.ok ? '✅ ' : '❌ ') + c.name + ' — ' + String(c.detail).replace(/</g, '&lt;')).join('<br>') + (PP.test.all_ok ? '<br><b>সব ঠিক — লাইভ শুরু করা যায়।</b>' : '<br><b style="color:#f5c542">কিছু ধাপ ব্যর্থ। ছুটি/বাজার বন্ধ থাকলে ক্যান্ডেল ০ আসা স্বাভাবিক; নয়তো এই লেখা আমাকে পাঠান।</b>')}));
-    }
-    box.append(h('button', {class: 'btn g', on: {click: async () => {
-      const body = {mode: PP.mode, settings: S, from: PP.from, to: PP.to, delay: PP.delay, step: PP.step, band: PP.band, feed: 'upstox', inst: META.info.inst};
-      const r = await api('/api/paper/start', body);
-      if (r.error) { alert(r.error); return; }
-      PP.last = null; paperPoll(); setTimeout(() => renderPaper(), 600);
-    }}}, '▶ পেপার শুরু'));
-    root.append(h('div', {class: 'card'}, box));
+function renderPaper() {
+  const root = $('#t-paper'); root.innerHTML = '';
+  root.append(h('div', {class: 'h2'}, '📄 Paper Trading'),
+    h('div', {class: 'note'}, 'আপনার বর্তমান স্ট্র্যাটেজি (Strategy ট্যাবের সেটিংস) একই ব্যাকটেস্ট-কোডে চালিয়ে "এখন পর্যন্ত জানা ডেটা" দিয়ে ট্রেড দেখায়; আসল অর্ডার যায় না। রিপ্লে = পুরনো দিন লাইভের মতো চালানো (ফিড ছাড়া); লাইভ = Upstox থেকে আজকের বাজার।'),
+    h('div', {id: 'pp-form'}), h('div', {id: 'pp-stat'}), h('div', {id: 'pp-list'}));
+  api('/api/paper/status').then(r => { PP.last = r.sess; PP.run = ppRun(); drawPaperForm(); drawPaperStat(); loadPaperList(); if (PP.run) paperPoll(); });
+}
+function drawPaperForm() {
+  const f = $('#pp-form'); if (!f) return; f.innerHTML = '';
+  if (ppRun()) return;
+  const i = META.info, dEnd = i.spot_to, d0 = new Date(dEnd); d0.setDate(d0.getDate() - 28);
+  if (!PP.from) PP.from = d0.toISOString().slice(0, 10); if (!PP.to) PP.to = dEnd;
+  const ms = h('select', {}, h('option', {value: 'replay'}, '🔁 রিপ্লে (পুরনো দিন)'), h('option', {value: 'live'}, '🟢 লাইভ (আজকের বাজার)')); ms.value = PP.mode;
+  ms.addEventListener('change', () => { PP.mode = ms.value; drawPaperForm(); });
+  const box = h('div', {class: 'body'}, F('মোড', ms));
+  if (PP.mode === 'replay') {
+    const a = h('input', {type: 'date', value: PP.from}), b = h('input', {type: 'date', value: PP.to});
+    a.addEventListener('change', () => PP.from = a.value); b.addEventListener('change', () => PP.to = b.value);
+    const sp = h('select', {}, h('option', {value: 0}, 'তাৎক্ষণিক'), h('option', {value: 0.05}, 'দ্রুত'), h('option', {value: 0.4}, 'ধীরে')); sp.value = PP.delay;
+    sp.addEventListener('change', () => PP.delay = parseFloat(sp.value));
+    const stp = h('select', {}, h('option', {value: 30}, 'প্রতি ৩০ মিনিটে (দ্রুত)'), h('option', {value: 15}, 'প্রতি ১৫ মিনিটে'), h('option', {value: 0}, 'প্রতি চার্ট-বারে (ধীর)')); stp.value = PP.step;
+    stp.addEventListener('change', () => PP.step = parseInt(stp.value));
+    box.append(F('শুরু', a), F('শেষ', b), F('টিক-ধাপ', stp), F('গতি', sp));
+  } else {
+    const pv = h('select', {}, h('option', {value: 'upstox'}, 'Upstox'), h('option', {value: 'zerodha', disabled: true}, 'Zerodha (শীঘ্রই)'), h('option', {value: 'angel', disabled: true}, 'Angel One (শীঘ্রই)'), h('option', {value: 'dhan', disabled: true}, 'Dhan (শীঘ্রই)'));
+    const bn = h('input', {type: 'number', value: PP.band, min: 1, max: 8}); bn.addEventListener('change', () => PP.band = parseInt(bn.value) || 3);
+    const out = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'});
+    const showTest = () => { out.innerHTML = !PP.test ? '' : PP.test === 'run' ? 'টেস্ট চলছে…' : PP.test.checks.map(c => (c.ok ? '✅ ' : '❌ ') + c.name + ' — ' + String(c.detail).replace(/</g, '&lt;')).join('<br>') + (PP.test.all_ok ? '<br><b>সব ঠিক — লাইভ শুরু করা যায়।</b>' : '<br><b style="color:#f5c542">কিছু ধাপ ব্যর্থ। ছুটি/বাজার বন্ধে ক্যান্ডেল ০ স্বাভাবিক; নয়তো এই লেখা আমাকে পাঠান।</b>'); };
+    box.append(F('ব্রোকার ফিড', pv), F('ATM-এর দুই পাশে স্ট্রাইক', bn),
+      h('button', {class: 'btn s', on: {click: async () => { PP.test = 'run'; showTest(); try { PP.test = await api('/api/live/test', {inst: (META.info.inst || 'N50')}); } catch (e) { PP.test = {checks: [{name: 'ত্রুটি', ok: false, detail: String(e)}]}; } showTest(); }}}, '🔌 লাইভ কানেকশন টেস্ট'), out);
+    showTest();
   }
-  if (!P) { try { const l = await api('/api/paper/list'); renderPaperList(root, l.list); } catch (e) {} return; }
-  const st = P.stats, run2 = P.running;
+  box.append(h('button', {class: 'btn g', on: {click: async () => {
+    const r = await api('/api/paper/start', {mode: PP.mode, settings: S, from: PP.from, to: PP.to, delay: PP.delay, step: PP.step, band: PP.band, feed: 'upstox', inst: META.info.inst});
+    if (r.error) { alert(r.error); return; }
+    PP.last = {running: true, status: 'running', msg: 'শুরু হচ্ছে…', stats: {n: 0, win: 0, pf: 0, dd: 0}, trades: [], events: [], live_pnl: 0}; PP.run = true; PP.sig = '';
+    drawPaperForm(); drawPaperStat(); paperPoll();
+  }}}, '▶ পেপার শুরু'));
+  f.append(h('div', {class: 'card'}, box));
+}
+function drawPaperStat() {
+  const root = $('#pp-stat'); if (!root) return;
+  const P = PP.last;
+  const sig = JSON.stringify([P && P.status, P && P.msg, P && P.now, P && P.stats && P.stats.n, P && P.live_pnl, P && P.open && P.open.net, P && P.events && P.events.length, PP.stopping, P && P.days_done]);
+  if (sig === PP.sig) return; PP.sig = sig;
+  root.innerHTML = '';
+  if (!P) return;
+  const st = P.stats, run = P.running;
   const col = {running: '#26c281', done: '#8fb7ff', stopped: '#f5c542', error: '#ff5d5d'}[P.status] || '#8b96a8';
+  const stopBtn = run ? h('button', {class: 'btn s', on: {click: async e => { PP.stopping = true; e.target.disabled = true; e.target.textContent = '… থামছে'; await api('/api/paper/stop', {}); paperPoll(); }}}, PP.stopping ? '… থামছে' : '■ থামান')
+    : h('button', {class: 'btn s', on: {click: async () => { await api('/api/paper/reset', {}); PP.last = null; PP.sig = ''; PP.run = false; drawPaperStat(); loadPaperList(); }}}, '✕ সেশন বন্ধ করুন');
   root.append(h('div', {class: 'card', style: 'border-color:' + col}, h('div', {class: 'body'},
-    h('div', {style: 'flex:1 1 100%'}, h('b', {style: 'color:' + col}, {running: '● চলছে', done: '✔ শেষ', stopped: '■ থামানো', error: '✖ ত্রুটি'}[P.status] || P.status), h('span', {class: 'pill'}, P.mode === 'live' ? 'লাইভ' : 'রিপ্লে'),
+    h('div', {style: 'flex:1 1 100%'}, h('b', {style: 'color:' + col}, PP.stopping ? '… থামছে' : ({running: '● চলছে', done: '✔ শেষ', stopped: '■ থামানো', error: '✖ ত্রুটি'}[P.status] || P.status)), h('span', {class: 'pill'}, P.mode === 'live' ? 'লাইভ' : 'রিপ্লে'),
       h('span', {class: 'pill'}, (P.day || '') + (P.now ? ' ' + String(Math.floor((P.now % 1440) / 60)).padStart(2, '0') + ':' + String(P.now % 60).padStart(2, '0') : ''))),
-    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (P.msg || '') + (P.mode === 'replay' && P.n_days ? ' | দিন ' + P.days_done + '/' + P.n_days : '')),
-    run2 ? h('button', {class: 'btn s', on: {click: async () => { await api('/api/paper/stop', {}); setTimeout(() => renderPaper(), 800); }}}, '■ থামান')
-         : h('button', {class: 'btn s', on: {click: async () => { await api('/api/paper/reset', {}); PP.last = null; renderPaper(); }}}, '✕ সেশন বন্ধ করুন'))));
+    h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (P.msg || '') + (P.mode === 'replay' && P.n_days ? ' | দিন ' + P.days_done + '/' + P.n_days : '')), stopBtn)));
   root.append(h('div', {class: 'kpis'},
     h('div', {class: 'kpi hero ' + (P.live_pnl >= 0 ? 'up' : 'dn')}, h('small', {}, 'মোট P&L (খোলা ট্রেড সহ)'), h('b', {class: cls(P.live_pnl)}, inr(P.live_pnl))),
     [['বন্ধ ট্রেড', st.n], ['Win%', st.win.toFixed(0) + '%'], ['PF', f2(st.pf)], ['সর্বোচ্চ DD', inr(st.dd)]].map(([k, v]) => h('div', {class: 'kpi'}, h('small', {}, k), h('b', {}, String(v))))));
@@ -1208,7 +1242,7 @@ async function renderPaper(soft) {
     const o = P.open;
     root.append(h('h3', {}, '🟢 চলমান ট্রেড'));
     root.append(tbl(['ট্রেড', 'ইন', 'এন্ট্রি', 'বাকি লট', 'SL', 'টার্গেট', 'MTM নেট ₹'], [[o.side, o.in, o.entry, o.rem + '/' + o.lots, o.slx == null ? '–' : o.slx.toFixed(1), o.tpx == null ? '–' : o.tpx.toFixed(1), pn(o.net)]]));
-    root.append(h('div', {class: 'note'}, 'MTM = এখনই বেরোলে যা হতো (খরচ সহ)। SL/টার্গেট = এই মুহূর্তের স্তর (ট্রেইলিং/ব্রেকইভেন সরলে বদলায়)।'));
+    root.append(h('div', {class: 'note'}, 'MTM = এখনই বেরোলে যা হতো (খরচ সহ)। SL/টার্গেট = এই মুহূর্তের স্তর।'));
   }
   if (P.events && P.events.length) {
     root.append(h('h3', {}, 'ঘটনা-লগ'));
@@ -1216,25 +1250,30 @@ async function renderPaper(soft) {
   }
   if (P.trades && P.trades.length) {
     root.append(h('h3', {}, 'বন্ধ হওয়া ট্রেড (' + P.trades.length + ')'));
-    root.append(tbl(['তারিখ', 'ট্রেড', 'ইন', 'আউট', 'কারণ', 'নেট ₹'], P.trades.slice(-120).reverse().map(t => [t.date.slice(5), t.side, t.in, t.out, legTxt(t), pn(t.net)]), '320px'));
+    root.append(tbl(['তারিখ', 'ট্রেড', 'ইন', 'আউট', 'কারণ', 'নেট ₹'], P.trades.slice(-80).reverse().map(t => [t.date.slice(5), t.side, t.in, t.out, legTxt(t), pn(t.net)]), '320px'));
     if (P.mode === 'replay' && P.status === 'done') {
-      const cb = h('button', {class: 'btn p', on: {click: async () => {
+      const cmp = h('div', {class: 'note'});
+      root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('button', {class: 'btn p', on: {click: async () => {
         const s2 = JSON.parse(JSON.stringify(S)); s2.general.from = P.from; s2.general.to = P.to;
         const r = await runJob({kind: 'run', settings: s2}, 'ব্যাকটেস্ট (তুলনা)'); if (!r) return;
         const a = r.stats.all, same = a.n === st.n && Math.abs(a.net - st.net) < 1;
         cmp.innerHTML = same ? '✅ <b>পেপার ও ব্যাকটেস্ট হুবহু মিলেছে</b> (' + a.n + ' ট্রেড, নেট ' + inr(a.net) + ')।' : '⚠ মেলেনি: ব্যাকটেস্ট ' + a.n + ' ট্রেড / ' + inr(a.net) + ', পেপার ' + st.n + ' ট্রেড / ' + inr(st.net) + ' (সেটিংস বদলেছে কিনা দেখুন)।';
-      }}}, '⚖ ব্যাকটেস্টের সাথে মিলিয়ে দেখুন');
-      const cmp = h('div', {class: 'note'});
-      root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, cb, cmp)));
+      }}}, '⚖ ব্যাকটেস্টের সাথে মিলিয়ে দেখুন'), cmp)));
     }
   }
-  try { const l = await api('/api/paper/list'); renderPaperList(root, l.list); } catch (e) {}
 }
-function renderPaperList(root, list) {
-  if (!list || !list.length) return;
-  root.append(h('h3', {}, 'আগের সেশন'));
-  root.append(tbl(['সেশন', 'মোড', 'পরিসর', 'ট্রেড', 'নেট ₹', ''], list.slice(0, 8).map(x => [x.name, x.mode === 'live' ? 'লাইভ' : 'রিপ্লে', (x.from || '').slice(5) + '→' + (x.to || '').slice(5), x.n, pn(x.net), '<a href="#" data-pl="' + x.id + '">খুলুন</a>'])));
-  root.querySelectorAll('a[data-pl]').forEach(a => a.addEventListener('click', async e => { e.preventDefault(); const r = await api('/api/paper/load', {id: a.dataset.pl}); if (r.error) alert(r.error); else { PP.last = null; renderPaper(); } }));
+async function loadPaperList() {
+  const root = $('#pp-list'); if (!root) return; root.innerHTML = '';
+  if (ppRun()) return;
+  try {
+    const l = (await api('/api/paper/list')).list; if (!l || !l.length) return;
+    root.append(h('h3', {}, 'আগের সেশন'));
+    const box = h('div', {class: 'card'}, h('div', {class: 'body'}));
+    l.slice(0, 8).forEach(x => box.firstChild.append(h('div', {style: 'flex:1 1 100%;display:flex;align-items:center;gap:8px;justify-content:space-between'},
+      h('div', {style: 'font-size:12.5px'}, h('b', {}, (x.mode === 'live' ? '🟢 ' : '🔁 ') + (x.from || '').slice(5) + ' → ' + (x.to || '').slice(5)), h('div', {class: 'note', style: 'margin:0', html: x.n + ' ট্রেড | ' + pn(x.net)})),
+      h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/paper/load', {id: x.id}); if (r.error) alert(r.error); else { PP.sig = ''; const s = await api('/api/paper/status'); PP.last = s.sess; drawPaperStat(); window.scrollTo(0, 0); } }}}, 'খুলুন'))));
+    root.append(box);
+  } catch (e) {}
 }
 
 /* ---------- ট্যাব ---------- */
