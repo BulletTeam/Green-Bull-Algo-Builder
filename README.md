@@ -77,3 +77,6 @@ Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার দ�
 
 ### 🧩 Option Selling Lab (নতুন ট্যাব "Selling")
 Black-Scholes IV/Greeks, ৯টি টেমপ্লেট (Short Straddle/Strangle, Iron Condor/Butterfly, Bull Put/Bear Call, Ratio, Jade Lizard, Calendar), লেগ-SL, Basket SL/TP/Lock/Trail, Move-SL-to-Cost, Re-entry, Auto-Adjust, Auto-Hedge, IVP ফিল্টার, আনুমানিক মার্জিন/ROM, ইন্টারেক্টিভ Payoff (Expiry + T+0, ±1SD/2SD, স্লাইডার, Net Greeks)। এখনকার সংস্করণ ইন্ট্রাডে।
+
+### Phase 1/3 বাকি অংশ
+ডাইনামিক সাইজিং (ফিক্সড/কম্পাউন্ড/%-ঝুঁকি), Equity+Underwater+Spot চার্ট, টপ-৫ DD, E-ratio টাইম-ডিকে, গ্যাপ-রেজিম; SMC সোর্স (Swing, BOS/CHoCH, FVG, Inside Bar, NR7, RVOL — রিপেইন্ট-মুক্ত); Optimize-এ 2D Heatmap ও 1D স্টেবিলিটি কার্ভ; AI v2-তে ইন্ডিকেটর/থ্রেশহোল্ড সার্চ (প্ল্যাটো-যাচাই), Base-vs-Suggested ইকুইটি, Monte Carlo ফ্যান, Ablation বার; ঐচ্ছিক LLM কো-পাইলট (`~/greenbull-data/llm_key.txt` বা UI-তে Key)।

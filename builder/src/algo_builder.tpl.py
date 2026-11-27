@@ -521,6 +521,11 @@ SOURCES = [
     ("r3", "Pivot R3", "Pivot / CPR"), ("s1", "Pivot S1", "Pivot / CPR"), ("s2", "Pivot S2", "Pivot / CPR"),
     ("s3", "Pivot S3", "Pivot / CPR"),
     ("cprt", "CPR Top", "Pivot / CPR"), ("cprb", "CPR Bottom", "Pivot / CPR"), ("cprw", "CPR Width %", "Pivot / CPR"),
+    ("swh", "Swing High (নিশ্চিত, ৩ বার)", "প্রাইস অ্যাকশন / SMC"), ("swl", "Swing Low (নিশ্চিত, ৩ বার)", "প্রাইস অ্যাকশন / SMC"),
+    ("bos", "BOS (+1 ওপরে ভাঙল / -1 নিচে)", "প্রাইস অ্যাকশন / SMC"), ("choch", "CHoCH (+1 বুলিশ / -1 বেয়ারিশ রিভার্সাল)", "প্রাইস অ্যাকশন / SMC"),
+    ("fvgb", "বুলিশ FVG সাইজ % (এই বারে)", "প্রাইস অ্যাকশন / SMC"), ("fvgs", "বেয়ারিশ FVG সাইজ % (এই বারে)", "প্রাইস অ্যাকশন / SMC"),
+    ("insb", "Inside Bar (1/0)", "প্রাইস অ্যাকশন / SMC"), ("nr7", "NR7 — ৭ বারের সবচেয়ে ছোট রেঞ্জ (1/0)", "প্রাইস অ্যাকশন / SMC"),
+    ("rvol", "Relative Volume (Volume ÷ Vol SMA)", "প্রাইস অ্যাকশন / SMC"),
 ]
 SRC_IDS = {s[0] for s in SOURCES}
 OPS = [("cross_above", "Crosses Above"), ("cross_below", "Crosses Below"), ("above", "Is Above"),
@@ -632,6 +637,59 @@ def compute_sources(D, tf, ind):
     orl = np.where(valid, orl, np.nan)
     S["orbh"], S["orbl"], S["orbm"], S["orbr"] = orh, orl, (orh + orl) / 2, orh - orl
 
+    # ---- প্রাইস অ্যাকশন / SMC (কোনো রিপেইন্ট নেই: সুইং ৩ বার পরে নিশ্চিত হয়, দিন-ভিত্তিক রিসেট) ----
+    NSW = 3
+    swh = np.full(n, np.nan)
+    swl = np.full(n, np.nan)
+    bos = np.zeros(n)
+    choch = np.zeros(n)
+    fvgb = np.zeros(n)
+    fvgs = np.zeros(n)
+    insb = np.zeros(n)
+    nr7 = np.zeros(n)
+    day_ = B.day
+    hi_, lo_, cl_ = B.h, B.l, B.c
+    cur_h = cur_l = np.nan
+    trend = 0
+    used_h = used_l = False
+    for i in range(n):
+        if i == 0 or day_[i] != day_[i - 1]:
+            cur_h = cur_l = np.nan
+            trend = 0
+            used_h = used_l = False
+            d0 = i
+        k = i - NSW                                  # k বারের সুইং এখন নিশ্চিত
+        if k - NSW >= d0:
+            if hi_[k] == np.max(hi_[k - NSW:i + 1]) and hi_[k] > np.max(hi_[k - NSW:k]):
+                cur_h, used_h = hi_[k], False
+            if lo_[k] == np.min(lo_[k - NSW:i + 1]) and lo_[k] < np.min(lo_[k - NSW:k]):
+                cur_l, used_l = lo_[k], False
+        swh[i], swl[i] = cur_h, cur_l
+        if not used_h and np.isfinite(cur_h) and cl_[i] > cur_h:
+            bos[i] = 1
+            used_h = True
+            if trend == -1:
+                choch[i] = 1
+            trend = 1
+        elif not used_l and np.isfinite(cur_l) and cl_[i] < cur_l:
+            bos[i] = -1
+            used_l = True
+            if trend == 1:
+                choch[i] = -1
+            trend = -1
+        if i >= d0 + 2:
+            if lo_[i] > hi_[i - 2]:
+                fvgb[i] = (lo_[i] - hi_[i - 2]) / cl_[i] * 100
+            if hi_[i] < lo_[i - 2]:
+                fvgs[i] = (lo_[i - 2] - hi_[i]) / cl_[i] * 100
+        if i > d0 and hi_[i] < hi_[i - 1] and lo_[i] > lo_[i - 1]:
+            insb[i] = 1
+        if i >= d0 + 6 and (hi_[i] - lo_[i]) <= np.min(hi_[i - 6:i + 1] - lo_[i - 6:i + 1]) + 1e-12:
+            nr7[i] = 1
+    S["swh"], S["swl"], S["bos"], S["choch"], S["fvgb"], S["fvgs"], S["insb"], S["nr7"] = swh, swl, bos, choch, fvgb, fvgs, insb, nr7
+    with np.errstate(all="ignore"):
+        S["rvol"] = B.v / S["volsma"]
+
     if len(D._cache) >= 6:
         D._cache.pop(next(iter(D._cache)))
     D._cache[key] = (S, B)
@@ -720,6 +778,7 @@ def default_settings():
             "fresh": True, "min_dte": 0, "skip_expiry_day": False,
             "brokerage": 20, "slip": 0.5, "charges_pct": 0.15,
             "sl_first": True, "split": 0, "chart": "spot",
+            "size_mode": "fixed", "risk_pct": 1.0, "max_lots": 20,
         },
         "ind": {
             "ma1": {"type": "ema", "len": 5, "tf": 0, "src": "close"},
@@ -769,8 +828,11 @@ def norm_settings(inp):
     G = st["general"]
     for k in ("tf", "lots", "max_trades", "min_dte", "split"):
         G[k] = int(float(G[k]))
-    for k in ("capital", "day_loss", "day_profit", "brokerage", "slip", "charges_pct"):
+    for k in ("capital", "day_loss", "day_profit", "brokerage", "slip", "charges_pct", "risk_pct"):
         G[k] = float(G[k])
+    G["max_lots"] = max(1, int(float(G.get("max_lots", 20) or 20)))
+    if G.get("size_mode") not in ("fixed", "compound", "risk"):
+        G["size_mode"] = "fixed"
     if G["tf"] % BASE_TF != 0 or G["tf"] < BASE_TF:
         raise ValueError("চার্ট TF %d মিনিটের গুণিতক হতে হবে (ডেটার ক্যান্ডেল %d মিনিট)" % (BASE_TF, BASE_TF))
     for c in st["cases"]:
@@ -1073,6 +1135,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
     trades = []
     slip = G["slip"]
     sl_first = bool(G["sl_first"])
+    size_state = {"cum": 0.0}
 
     def locate(ex, typ, stk, te):
         ct = D.opt.get((ex, typ, float(stk)))
@@ -1136,6 +1199,11 @@ def backtest(D, raw, light=False, progress=None, now=None):
             tp = raw_e + side * tv * abs(raw_e - sl)
         # ---- আংশিক প্রফিট বুকিং (T1/T2) — লট পূর্ণসংখ্যায়, অন্তত ১ লট রানারের জন্য থাকে ----
         L = G["lots"]
+        _cur = max(G["capital"] + size_state["cum"], 0.2 * G["capital"])
+        if G["size_mode"] == "compound":
+            L = max(1, min(G["max_lots"], int(G["lots"] * _cur / G["capital"])))
+        elif G["size_mode"] == "risk" and sl0 is not None and abs(raw_e - sl0) * lot > 0:
+            L = max(1, min(G["max_lots"], int(_cur * G["risk_pct"] / 100.0 // (abs(raw_e - sl0) * lot))))
         tg = cs.get("tg", {})
         books = []
         if tg.get("on") and L >= 2:
@@ -1437,7 +1505,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 "date": day_str(d), "case": cs["name"], "side": "%s %s %d" % (cs["action"], cs["opt"], stk),
                 "expiry": day_str(ex), "in": hm_str(te), "out": hm_str(r["exit_t"]),
                 "entry": round(r["entry_eff"], 2), "exit": round(r["exit_eff"], 2),
-                "reason": r["reason"], "lots": G["lots"], "qty": r["qty"],
+                "reason": r["reason"], "lots": int(r["qty"] // max(lot, 1)), "qty": r["qty"],
                 "gross": round(r["gross"], 2), "costs": round(r["costs"], 2), "net": round(r["net"], 2),
                 "ret": round(r["ret"], 2), "spot": round(spot_px, 2), "bars": r["bars"],
                 "hold": int(r["exit_t"] - te), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
@@ -1449,6 +1517,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
             ntr += 1
             dpnl += r["net"]
             cursor = r["exit_t"]
+            size_state["cum"] += r["net"]
             if (G["day_loss"] > 0 and dpnl <= -G["day_loss"]) or (G["day_profit"] > 0 and dpnl >= G["day_profit"]):
                 break
 
@@ -1471,7 +1540,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
     out["trades"] = trades
     out["an"] = analyze(trades, cap, getattr(D, "base", BASE_TF))
     try:
-        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None)
+        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None, D)
     except Exception as e:
         out["an"]["adv"] = {"err": str(e)}
     eq, cum = [], 0.0
@@ -1489,7 +1558,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
 
 
 
-def advanced_stats(trades, cap, days_list, Sx=None):
+def advanced_stats(trades, cap, days_list, Sx=None, D=None):
     """Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার, রেজিম, মার্জিন-ROI"""
     if not trades:
         return {}
@@ -1564,13 +1633,94 @@ def advanced_stats(trades, cap, days_list, Sx=None):
             reg["rsi"] = bucket("rsi", [40, 60], ["RSI<40", "RSI 40-60", "RSI>60"])
         except Exception:
             pass
+    # গ্যাপ রেজিম ও টাইম-ডিকে E-ratio ও টপ-৫ DD (স্পট ডেটা D লাগে)
+    try:
+        if D is not None:
+            gg = {}
+            for t in trades:
+                j = int(np.searchsorted(D.du, day_int(t["date"])))
+                if j <= 0 or j >= len(D.du):
+                    continue
+                gp = (D.dO[j] / D.dC[j - 1] - 1) * 100
+                k = "Gap-Up (>0.3%)" if gp > 0.3 else ("Gap-Down (<-0.3%)" if gp < -0.3 else "Flat গ্যাপ")
+                gg.setdefault(k, []).append(t)
+            rows = []
+            for k in ("Gap-Up (>0.3%)", "Flat গ্যাপ", "Gap-Down (<-0.3%)"):
+                if k in gg:
+                    st_ = calc_stats(gg[k], cap)
+                    rows.append({"k": k, "n": st_["n"], "win": st_["win"], "net": st_["net"], "pf": st_["pf"], "exp": st_["exp"]})
+            reg["gap"] = rows
+            ed = []
+            for h_ in (5, 15, 30, 60):
+                fav, adv, n_ = [], [], 0
+                for t in trades:
+                    sp_ = t["side"].split()
+                    if len(sp_) < 3:
+                        continue
+                    ct = D.opt.get((day_int(t["expiry"]), sp_[1], float(sp_[2])))
+                    if ct is None:
+                        continue
+                    te = day_int(t["date"]) * 1440 + hm(t["in"])
+                    j0 = int(np.searchsorted(ct[0], te))
+                    if j0 >= len(ct[0]) or ct[0][j0] != te:
+                        continue
+                    j1 = int(np.searchsorted(ct[0], te + h_, "right"))
+                    e0 = float(ct[1][j0])
+                    if e0 <= 0 or j1 <= j0:
+                        continue
+                    hh, ll = float(ct[2][j0:j1].max()), float(ct[3][j0:j1].min())
+                    sd = 1 if sp_[0] == "BUY" else -1
+                    f_, a_ = ((hh - e0), (e0 - ll)) if sd == 1 else ((e0 - ll), (hh - e0))
+                    fav.append(100 * max(f_, 0) / e0)
+                    adv.append(100 * max(a_, 0) / e0)
+                if fav:
+                    ed.append({"min": h_, "n": len(fav), "mfe": float(np.mean(fav)), "mae": float(np.mean(adv)), "ratio": float(np.mean(fav) / np.mean(adv)) if np.mean(adv) > 0 else 0.0})
+            out["eratio_decay"] = ed
+            # টপ-৫ ড্রডাউন + স্থবিরতা + সিঙ্কড চার্ট
+            dts = list(days_list) if days_list else sorted(by)
+            eqd = np.cumsum(dp)
+            pk = np.maximum.accumulate(np.r_[0.0, eqd])[1:]
+            ddd = eqd - pk
+            per, i = [], 0
+            while i < len(ddd):
+                if ddd[i] < 0:
+                    j = i
+                    while j < len(ddd) and ddd[j] < 0:
+                        j += 1
+                    seg = ddd[i:j]
+                    k_ = int(np.argmin(seg)) + i
+                    per.append({"from": dts[i - 1] if i > 0 else dts[0], "trough": dts[k_], "to": dts[j] if j < len(dts) else None, "dd": float(seg.min()), "days": int(j - i + 1)})
+                    i = j
+                else:
+                    i += 1
+            per.sort(key=lambda x: x["dd"])
+            out["top_dd"] = per[:5]
+            last_pk = 0
+            stag = 0
+            for i in range(len(eqd)):
+                if eqd[i] >= pk[i] - 1e-9 and eqd[i] > (eqd[last_pk] if last_pk < len(eqd) else -1e18) - 1e-9:
+                    stag = max(stag, (day_int(dts[i]) - day_int(dts[last_pk])))
+                    last_pk = i
+            stag = max(stag, day_int(dts[-1]) - day_int(dts[last_pk]))
+            out["stagnation_days"] = int(stag)
+            sp0 = None
+            spot_b = []
+            for dd_ in dts:
+                j = int(np.searchsorted(D.du, day_int(dd_)))
+                v = float(D.dC[min(j, len(D.dC) - 1)])
+                sp0 = v if sp0 is None else sp0
+                spot_b.append(round(cap * (v / sp0 - 1), 0))
+            step = max(1, len(dts) // 400)
+            out["sync"] = {"dates": dts[::step], "eq": [round(float(x), 0) for x in eqd[::step]], "dd": [round(float(x), 0) for x in ddd[::step]], "spot": spot_b[::step]}
+    except Exception as e:
+        out["adv_err"] = str(e)
     out["regime"] = {k: v for k, v in reg.items() if v}
     # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
-    hm = {}
+    hmap = {}
     for t in trades:
         k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
-        hm[k] = hm.get(k, 0.0) + t["net"]
-    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hm.items()]
+        hmap[k] = hmap.get(k, 0.0) + t["net"]
+    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hmap.items()]
     mh = {}
     for t in trades:
         mh[(t["date"][:4], int(t["date"][5:7]))] = mh.get((t["date"][:4], int(t["date"][5:7])), 0.0) + t["net"]
@@ -2230,6 +2380,100 @@ def sell_preview(D, raw, date_str=None):
     stk = D.strikes.get((ex, "CE"))
     return {"date": day_str(d), "expiry": day_str(ex), "spot": round(spot, 2), "lot": lot, "legs": res, "atm_iv": round(atm_iv * 100, 2), "margin": round(m, 0),
             "T_days": round(_T_years(ex, te) * 365, 2), "rf": _RF, "strike_step": float(np.median(np.diff(stk))) if stk is not None and len(stk) > 1 else 100.0}
+
+
+
+# =====================================================================
+#  হাইব্রিড LLM কো-পাইলট (ঐচ্ছিক)। LLM কোনো গণিত করে না — শুধু (ক) আইডিয়া → Case JSON, (খ) ফলাফলের ভাষ্য।
+#  সব সংখ্যা ও যাচাই আমাদের ইঞ্জিনেই হয়; কী না থাকলে এই অংশ নিষ্ক্রিয়।
+# =====================================================================
+LLM_MODEL = "claude-sonnet-5-5"
+
+
+def llm_key(given=None):
+    if given:
+        return str(given).strip()
+    for pth in (os.environ.get("ANTHROPIC_API_KEY"), None):
+        if pth:
+            return pth.strip()
+    try:
+        d = (DATA.get("src") or {}).get("db_dir")
+        if d and os.path.exists(os.path.join(d, "llm_key.txt")):
+            return open(os.path.join(d, "llm_key.txt")).read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+def llm_call(system, user, key, max_tokens=1600):
+    import requests
+    r = requests.post("https://api.anthropic.com/v1/messages",
+                      headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                      json={"model": LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
+    if r.status_code != 200:
+        raise ValueError("LLM ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+    j = r.json()
+    return "".join(b.get("text", "") for b in j.get("content", []))
+
+
+def _extract_json(txt):
+    i = txt.find("{")
+    if i < 0:
+        raise ValueError("LLM JSON ফেরত দেয়নি")
+    depth = 0
+    for k in range(i, len(txt)):
+        if txt[k] == "{":
+            depth += 1
+        elif txt[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(txt[i:k + 1])
+    raise ValueError("LLM-এর JSON অসম্পূর্ণ")
+
+
+def copilot_idea(text, key, caller=None):
+    caller = caller or llm_call
+    src = ", ".join(sorted(SRC_IDS - {"number"}))
+    ops = ", ".join(o[0] for o in OPS)
+    system = ("তুমি Green Bull Algo Builder-এর জন্য ট্রেডিং-আইডিয়াকে সেটিংস JSON-এ রূপান্তর করো। শুধু একটি JSON অবজেক্ট ফেরত দাও, অন্য কিছু নয়।\n"
+              "স্কিমা: {\"name\":str,\"action\":\"BUY\"|\"SELL\",\"opt\":\"CE\"|\"PE\",\"strike\":{\"mode\":\"offset\",\"off\":int}, "
+              "\"entry\":[{\"l\":src,\"op\":op,\"r\":src|\"number\",\"num\":float,\"join\":\"AND\"|\"OR\"}], \"exit\":[same],"
+              "\"sl\":{\"mode\":\"pct\"|\"pts\"|\"none\",\"val\":float},\"tp\":{...},\"trail\":{\"mode\":\"none\"|\"pct\",\"val\":float,\"act\":float},\"time_stop\":int}\n"
+              "অনুমোদিত src: %s\nঅনুমোদিত op: %s\nঅজানা কিছু বানাবে না; আইডিয়া বোঝা না গেলে {\"error\":\"কারণ\"} দাও। কোনো গাণিতিক ফলাফল দাবি করবে না।" % (src, ops))
+    out = _extract_json(caller(system, text, key))
+    if out.get("error"):
+        raise ValueError("আইডিয়া বোঝা যায়নি: %s" % out["error"])
+    c = default_case(1)
+    for k in ("name", "action", "opt"):
+        if out.get(k):
+            c[k] = out[k]
+    if isinstance(out.get("strike"), dict) and out["strike"].get("mode") == "offset":
+        c["strike"]["off"] = int(float(out["strike"].get("off", 0)))
+    for part in ("entry", "exit"):
+        if part in out:
+            lst = []
+            for x in out[part] or []:
+                if x.get("l") not in SRC_IDS or x.get("l") == "number" or x.get("op") not in {o[0] for o in OPS}:
+                    raise ValueError("LLM অবৈধ শর্ত দিয়েছে: %s" % json.dumps(x, ensure_ascii=False)[:100])
+                r = x.get("r", "number")
+                if r not in SRC_IDS:
+                    r = "number"
+                lst.append(slot(x["l"], x["op"], r, float(x.get("num", 0) or 0), join=("OR" if str(x.get("join", "AND")).upper() == "OR" else "AND")))
+            c[part] = lst
+    for k in ("sl", "tp", "trail"):
+        if isinstance(out.get(k), dict):
+            c[k].update({a: b for a, b in out[k].items() if a in c[k]})
+    if out.get("time_stop") is not None:
+        c["time_stop"] = int(float(out["time_stop"]))
+    chk = norm_settings({"cases": [c]})            # অবৈধ হলে এখানেই ValueError
+    return chk["cases"][0]
+
+
+def copilot_explain(payload, key, caller=None):
+    caller = caller or llm_call
+    system = ("তুমি একজন কোয়ান্ট-রিসার্চ সহকারী। নিচের JSON ফলাফল সহজ বাংলায় ব্যাখ্যা করো: কী ভালো, কী ঝুঁকিপূর্ণ, কোন সাজেশন বিশ্বাসযোগ্য এবং কেন। "
+              "শুধু দেওয়া সংখ্যা ব্যবহার করো, নিজে কোনো গণনা বা নতুন সংখ্যা বানাবে না, ভবিষ্যৎ-প্রতিশ্রুতি দেবে না। ৮–১২ লাইনের মধ্যে রাখো।")
+    return caller(system, json.dumps(payload, ensure_ascii=False)[:9000], key)
 
 
 # =====================================================================
@@ -2899,6 +3143,37 @@ def _sc_basic(trs, cap, min_n=1):
     return float(st["net"] / (abs(st["dd"]) + 0.02 * cap)), st
 
 
+
+def mc_fan(trades, cap, n=500, seed=7):
+    """বুটস্ট্র্যাপ Monte Carlo: ট্রেডের ক্রম ওলট-পালট করে ইকুইটির P5/P25/P50/P75/P95 ফ্যান ও DD বণ্টন"""
+    if len(trades) < 10:
+        return None
+    a = np.array([t["net"] for t in trades], float)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(a), size=(n, len(a)))
+    paths = np.cumsum(a[idx], axis=1)
+    pk = np.maximum.accumulate(np.concatenate([np.zeros((n, 1)), paths], axis=1), axis=1)[:, 1:]
+    mdd = (paths - pk).min(axis=1)
+    q = np.percentile(paths, [5, 25, 50, 75, 95], axis=0)
+    step = max(1, paths.shape[1] // 120)
+    return {"p5": q[0][::step].round(0).tolist(), "p25": q[1][::step].round(0).tolist(), "p50": q[2][::step].round(0).tolist(),
+            "p75": q[3][::step].round(0).tolist(), "p95": q[4][::step].round(0).tolist(),
+            "dd_p50": float(np.percentile(mdd, 50)), "dd_p95": float(np.percentile(mdd, 5)),
+            "end_p5": float(q[0][-1]), "end_p50": float(q[2][-1]), "end_p95": float(q[4][-1]),
+            "p_profit": float(100 * (paths[:, -1] > 0).mean()), "p_ruin": float(100 * (paths.min(axis=1) < -0.5 * cap).mean()), "n": len(a), "step": step}
+
+
+def _daily_curve(trades, dates):
+    by = {}
+    for t in trades:
+        by[t["date"]] = by.get(t["date"], 0.0) + t["net"]
+    c, out = 0.0, []
+    for d in dates:
+        c += by.get(d, 0.0)
+        out.append(round(c, 0))
+    return out
+
+
 def advise2(D, raw, opts, progress=None):
     t0 = time.time()
     base = norm_settings(raw)
@@ -3223,6 +3498,95 @@ def advise2(D, raw, opts, progress=None):
     if out.get("filter_settings_entry"):
         comb["cases"][ci]["entry"] = out["filter_settings_entry"]
     comb_tr = run(comb)["trades"]
+
+    # ---------------- ৩ক) ইন্ডিকেটর-প্যারামিটার ও এন্ট্রি-থ্রেশহোল্ড সার্চ (প্রতিবেশী-যাচাইসহ) ----------------
+    IND_MAP = {"ma1": [("ind.ma1.len", [5, 8, 9, 10, 13, 20, 21, 34, 50])], "ma2": [("ind.ma2.len", [5, 8, 9, 10, 13, 20, 21, 34, 50])], "ma3": [("ind.ma3.len", [10, 20, 21, 34, 50, 100])],
+               "rsi": [("ind.rsi.len", [7, 9, 14, 21])], "adx": [("ind.adx.len", [7, 10, 14, 20])], "dip": [("ind.adx.len", [7, 10, 14, 20])], "dim": [("ind.adx.len", [7, 10, 14, 20])],
+               "atr": [("ind.atr.len", [7, 10, 14, 20])], "bodyatr": [("ind.atr.len", [7, 10, 14, 20])],
+               "st1": [("ind.st1.len", [7, 10, 14]), ("ind.st1.mult", [1.0, 1.5, 2.0, 2.5, 3.0])], "st1dir": [("ind.st1.len", [7, 10, 14]), ("ind.st1.mult", [1.0, 1.5, 2.0, 2.5, 3.0])],
+               "st2": [("ind.st2.len", [7, 10, 14]), ("ind.st2.mult", [2.0, 2.5, 3.0, 4.0])], "st2dir": [("ind.st2.len", [7, 10, 14]), ("ind.st2.mult", [2.0, 2.5, 3.0, 4.0])],
+               "bbup": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])], "bblow": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])],
+               "bbmid": [("ind.bb.len", [14, 20, 30])], "bbw": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])],
+               "donhi": [("ind.don.n", [10, 15, 20, 30])], "donlo": [("ind.don.n", [10, 15, 20, 30])], "orbh": [("ind.orb.mins", [5, 15, 30])], "orbl": [("ind.orb.mins", [5, 15, 30])]}
+    cands_i = []
+    seen_p = set()
+    for sl_i, sl_ in enumerate(comb["cases"][ci]["entry"]):
+        if not sl_.get("on", True):
+            continue
+        for k_ in ("l", "r"):
+            for pth, gv in IND_MAP.get(sl_[k_], []):
+                if pth not in seen_p:
+                    seen_p.add(pth)
+                    cands_i.append(("ind", pth, gv))
+        if sl_["r"] == "number":
+            v0 = float(sl_.get("num", 0))
+            if sl_["l"] in ("rsi",):
+                gv = [round(v0 + d, 2) for d in (-10, -5, 5, 10)]
+            elif v0 != 0:
+                gv = [round(v0 * f, 2) for f in (0.7, 0.85, 1.15, 1.3)]
+            else:
+                gv = []
+            if gv:
+                cands_i.append(("slot", "cases.%d.entry.%d.num" % (ci, sl_i), gv))
+    ind_rows = []
+    cur_s, cur_tr = comb, comb_tr
+    n_ind = 0
+    for kind_, pth, gv in cands_i:
+        if n_ind >= 30:
+            break
+        base_v = None
+        try:
+            o_ = cur_s
+            for kk in pth.split("."):
+                o_ = o_[int(kk)] if isinstance(o_, list) else o_[kk]
+            base_v = o_
+        except Exception:
+            continue
+        r0 = robust(cur_tr)
+        best = None
+        for v in gv:
+            if v == base_v:
+                continue
+            s2 = copy.deepcopy(cur_s)
+            set_path(s2, pth, v)
+            try:
+                tr2 = run(s2)["trades"]
+            except Exception:
+                continue
+            n_ind += 1
+            rb = robust(tr2)
+            if rb is None or r0 is None:
+                continue
+            a_tr, a_te = min_split(tr2)
+            p_tr, p_te = min_split(cur_tr)
+            _, sta = ssc(a_tr); _, stp = ssc(p_tr); _, stta = ssc(a_te); _, sttp = ssc(p_te)
+            rec = {"param": pth, "from": base_v, "to": v, "d_train": float(sta["net"] - stp["net"]), "d_test": float(stta["net"] - sttp["net"]), "n": len(tr2), "rob": rb, "rob_prev": r0}
+            rec["ok"] = bool(rb > r0 * 1.05 and rec["d_test"] >= 0 and len(tr2) >= 0.6 * len(cur_tr))
+            ind_rows.append(rec)
+            if rec["ok"] and (best is None or rb > best[0]):
+                best = (rb, v, s2, tr2, rec)
+        if best:
+            # প্ল্যাটো-যাচাই: নির্বাচিত মানের দুই পাশের মান অন্তত ৮৫% স্কোর ধরে রাখতে হবে
+            gl = sorted(set([x for x in gv] + [base_v]), key=lambda z: float(z))
+            ix = gl.index(best[1])
+            nb = [gl[j] for j in (ix - 1, ix + 1) if 0 <= j < len(gl)]
+            okp = True
+            for v in nb:
+                s3 = copy.deepcopy(cur_s)
+                set_path(s3, pth, v)
+                try:
+                    r3 = robust(run(s3)["trades"])
+                except Exception:
+                    r3 = None
+                if r3 is None or r3 < best[0] * 0.85:
+                    okp = False
+            best[4]["plateau"] = bool(okp)
+            if okp:
+                best[4]["chosen"] = True
+                cur_s, cur_tr = best[2], best[3]
+    out["ind_search"] = ind_rows
+    if cur_s is not comb:
+        comb, comb_tr = cur_s, cur_tr
     def pack(trs):
         a, b2 = min_split(trs)
         return {"all": _tr(calc_stats(trs, cap)), "train": _tr(calc_stats(a, cap)), "test": _tr(calc_stats(b2, cap)),
@@ -3230,6 +3594,9 @@ def advise2(D, raw, opts, progress=None):
     out["base"] = pack(bt)
     out["exit_best"] = pack(btr)
     out["final"] = pack(comb_tr)
+    alld = sorted({t["date"] for t in bt} | {t["date"] for t in comb_tr})
+    out["curves"] = {"dates": alld, "base": _daily_curve(bt, alld), "final": _daily_curve(comb_tr, alld), "split": split_date}
+    out["mc"] = {"base": mc_fan(bt, cap), "final": mc_fan(comb_tr, cap)}
     # পরিবর্তনের তালিকা (settings diff)
     chg = []
     def addc(label, a, b2, muts):
@@ -3246,6 +3613,9 @@ def advise2(D, raw, opts, progress=None):
                                     (cp + "trail.unit", cn["trail"].get("unit", "pct")), (cp + "trail.trig", cn["trail"].get("trig")), (cp + "trail.move", cn["trail"].get("move"))])
     addc("ব্রেকইভেন", (cb["be"]["on"], cb["be"]["val"]), (cn["be"]["on"], cn["be"]["val"]), [(cp + "be.on", cn["be"]["on"]), (cp + "be.val", cn["be"]["val"])])
     addc("টাইম-স্টপ", cb.get("time_stop", 0), cn.get("time_stop", 0), [(cp + "time_stop", cn.get("time_stop", 0))])
+    for r_ in out["ind_search"]:
+        if r_.get("chosen"):
+            addc("ইন্ডিকেটর/থ্রেশহোল্ড " + r_["param"], r_["from"], r_["to"], [(r_["param"], r_["to"])])
     if out.get("filter_settings_entry") and len(out["filter_settings_entry"]) != len(cb["entry"]):
         addc("এন্ট্রি ফিল্টার", len(cb["entry"]), len(out["filter_settings_entry"]), [(cp + "entry", out["filter_settings_entry"])])
     out["changes"] = chg
@@ -3293,7 +3663,7 @@ def advise2(D, raw, opts, progress=None):
 
 PRICE_OVERLAY = {"ma1", "ma2", "ma3", "st1", "st2", "vwap", "bbup", "bbmid", "bblow", "donhi", "donlo", "orbh", "orbl",
                  "orbm", "dayo", "dayh", "dayl", "pdh", "pdl", "pdc", "pivp", "r1", "r2", "r3", "s1", "s2", "s3",
-                 "cprt", "cprb"}
+                 "cprt", "cprb", "swh", "swl"}
 PLAIN_PRICE = {"close", "open", "high", "low", "hl2", "hlc3", "ohlc4"}
 
 
@@ -4176,6 +4546,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             if u.path == "/api/paper/start":
                 return self._json({"id": paper_start(body)})
+            if u.path == "/api/copilot":
+                key = llm_key(body.get("key"))
+                if not key:
+                    return self._json({"error": "API Key দেওয়া নেই (এটি ঐচ্ছিক ফিচার; অফলাইন অ্যাডভাইজার Key ছাড়াই চলে)"})
+                try:
+                    if body.get("mode") == "idea":
+                        return self._json({"case": copilot_idea(str(body.get("text", ""))[:1500], key)})
+                    return self._json({"text": copilot_explain(body.get("payload") or {}, key)})
+                except Exception as e:
+                    return self._json({"error": str(e)})
             if u.path == "/api/live/test":
                 src = DATA.get("src") or {}
                 return self._json(live_selftest(body.get("inst") or src.get("inst") or "N50", body.get("provider", "upstox")))

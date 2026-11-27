@@ -521,6 +521,11 @@ SOURCES = [
     ("r3", "Pivot R3", "Pivot / CPR"), ("s1", "Pivot S1", "Pivot / CPR"), ("s2", "Pivot S2", "Pivot / CPR"),
     ("s3", "Pivot S3", "Pivot / CPR"),
     ("cprt", "CPR Top", "Pivot / CPR"), ("cprb", "CPR Bottom", "Pivot / CPR"), ("cprw", "CPR Width %", "Pivot / CPR"),
+    ("swh", "Swing High (নিশ্চিত, ৩ বার)", "প্রাইস অ্যাকশন / SMC"), ("swl", "Swing Low (নিশ্চিত, ৩ বার)", "প্রাইস অ্যাকশন / SMC"),
+    ("bos", "BOS (+1 ওপরে ভাঙল / -1 নিচে)", "প্রাইস অ্যাকশন / SMC"), ("choch", "CHoCH (+1 বুলিশ / -1 বেয়ারিশ রিভার্সাল)", "প্রাইস অ্যাকশন / SMC"),
+    ("fvgb", "বুলিশ FVG সাইজ % (এই বারে)", "প্রাইস অ্যাকশন / SMC"), ("fvgs", "বেয়ারিশ FVG সাইজ % (এই বারে)", "প্রাইস অ্যাকশন / SMC"),
+    ("insb", "Inside Bar (1/0)", "প্রাইস অ্যাকশন / SMC"), ("nr7", "NR7 — ৭ বারের সবচেয়ে ছোট রেঞ্জ (1/0)", "প্রাইস অ্যাকশন / SMC"),
+    ("rvol", "Relative Volume (Volume ÷ Vol SMA)", "প্রাইস অ্যাকশন / SMC"),
 ]
 SRC_IDS = {s[0] for s in SOURCES}
 OPS = [("cross_above", "Crosses Above"), ("cross_below", "Crosses Below"), ("above", "Is Above"),
@@ -632,6 +637,59 @@ def compute_sources(D, tf, ind):
     orl = np.where(valid, orl, np.nan)
     S["orbh"], S["orbl"], S["orbm"], S["orbr"] = orh, orl, (orh + orl) / 2, orh - orl
 
+    # ---- প্রাইস অ্যাকশন / SMC (কোনো রিপেইন্ট নেই: সুইং ৩ বার পরে নিশ্চিত হয়, দিন-ভিত্তিক রিসেট) ----
+    NSW = 3
+    swh = np.full(n, np.nan)
+    swl = np.full(n, np.nan)
+    bos = np.zeros(n)
+    choch = np.zeros(n)
+    fvgb = np.zeros(n)
+    fvgs = np.zeros(n)
+    insb = np.zeros(n)
+    nr7 = np.zeros(n)
+    day_ = B.day
+    hi_, lo_, cl_ = B.h, B.l, B.c
+    cur_h = cur_l = np.nan
+    trend = 0
+    used_h = used_l = False
+    for i in range(n):
+        if i == 0 or day_[i] != day_[i - 1]:
+            cur_h = cur_l = np.nan
+            trend = 0
+            used_h = used_l = False
+            d0 = i
+        k = i - NSW                                  # k বারের সুইং এখন নিশ্চিত
+        if k - NSW >= d0:
+            if hi_[k] == np.max(hi_[k - NSW:i + 1]) and hi_[k] > np.max(hi_[k - NSW:k]):
+                cur_h, used_h = hi_[k], False
+            if lo_[k] == np.min(lo_[k - NSW:i + 1]) and lo_[k] < np.min(lo_[k - NSW:k]):
+                cur_l, used_l = lo_[k], False
+        swh[i], swl[i] = cur_h, cur_l
+        if not used_h and np.isfinite(cur_h) and cl_[i] > cur_h:
+            bos[i] = 1
+            used_h = True
+            if trend == -1:
+                choch[i] = 1
+            trend = 1
+        elif not used_l and np.isfinite(cur_l) and cl_[i] < cur_l:
+            bos[i] = -1
+            used_l = True
+            if trend == 1:
+                choch[i] = -1
+            trend = -1
+        if i >= d0 + 2:
+            if lo_[i] > hi_[i - 2]:
+                fvgb[i] = (lo_[i] - hi_[i - 2]) / cl_[i] * 100
+            if hi_[i] < lo_[i - 2]:
+                fvgs[i] = (lo_[i - 2] - hi_[i]) / cl_[i] * 100
+        if i > d0 and hi_[i] < hi_[i - 1] and lo_[i] > lo_[i - 1]:
+            insb[i] = 1
+        if i >= d0 + 6 and (hi_[i] - lo_[i]) <= np.min(hi_[i - 6:i + 1] - lo_[i - 6:i + 1]) + 1e-12:
+            nr7[i] = 1
+    S["swh"], S["swl"], S["bos"], S["choch"], S["fvgb"], S["fvgs"], S["insb"], S["nr7"] = swh, swl, bos, choch, fvgb, fvgs, insb, nr7
+    with np.errstate(all="ignore"):
+        S["rvol"] = B.v / S["volsma"]
+
     if len(D._cache) >= 6:
         D._cache.pop(next(iter(D._cache)))
     D._cache[key] = (S, B)
@@ -720,6 +778,7 @@ def default_settings():
             "fresh": True, "min_dte": 0, "skip_expiry_day": False,
             "brokerage": 20, "slip": 0.5, "charges_pct": 0.15,
             "sl_first": True, "split": 0, "chart": "spot",
+            "size_mode": "fixed", "risk_pct": 1.0, "max_lots": 20,
         },
         "ind": {
             "ma1": {"type": "ema", "len": 5, "tf": 0, "src": "close"},
@@ -769,8 +828,11 @@ def norm_settings(inp):
     G = st["general"]
     for k in ("tf", "lots", "max_trades", "min_dte", "split"):
         G[k] = int(float(G[k]))
-    for k in ("capital", "day_loss", "day_profit", "brokerage", "slip", "charges_pct"):
+    for k in ("capital", "day_loss", "day_profit", "brokerage", "slip", "charges_pct", "risk_pct"):
         G[k] = float(G[k])
+    G["max_lots"] = max(1, int(float(G.get("max_lots", 20) or 20)))
+    if G.get("size_mode") not in ("fixed", "compound", "risk"):
+        G["size_mode"] = "fixed"
     if G["tf"] % BASE_TF != 0 or G["tf"] < BASE_TF:
         raise ValueError("চার্ট TF %d মিনিটের গুণিতক হতে হবে (ডেটার ক্যান্ডেল %d মিনিট)" % (BASE_TF, BASE_TF))
     for c in st["cases"]:
@@ -1073,6 +1135,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
     trades = []
     slip = G["slip"]
     sl_first = bool(G["sl_first"])
+    size_state = {"cum": 0.0}
 
     def locate(ex, typ, stk, te):
         ct = D.opt.get((ex, typ, float(stk)))
@@ -1136,6 +1199,11 @@ def backtest(D, raw, light=False, progress=None, now=None):
             tp = raw_e + side * tv * abs(raw_e - sl)
         # ---- আংশিক প্রফিট বুকিং (T1/T2) — লট পূর্ণসংখ্যায়, অন্তত ১ লট রানারের জন্য থাকে ----
         L = G["lots"]
+        _cur = max(G["capital"] + size_state["cum"], 0.2 * G["capital"])
+        if G["size_mode"] == "compound":
+            L = max(1, min(G["max_lots"], int(G["lots"] * _cur / G["capital"])))
+        elif G["size_mode"] == "risk" and sl0 is not None and abs(raw_e - sl0) * lot > 0:
+            L = max(1, min(G["max_lots"], int(_cur * G["risk_pct"] / 100.0 // (abs(raw_e - sl0) * lot))))
         tg = cs.get("tg", {})
         books = []
         if tg.get("on") and L >= 2:
@@ -1437,7 +1505,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 "date": day_str(d), "case": cs["name"], "side": "%s %s %d" % (cs["action"], cs["opt"], stk),
                 "expiry": day_str(ex), "in": hm_str(te), "out": hm_str(r["exit_t"]),
                 "entry": round(r["entry_eff"], 2), "exit": round(r["exit_eff"], 2),
-                "reason": r["reason"], "lots": G["lots"], "qty": r["qty"],
+                "reason": r["reason"], "lots": int(r["qty"] // max(lot, 1)), "qty": r["qty"],
                 "gross": round(r["gross"], 2), "costs": round(r["costs"], 2), "net": round(r["net"], 2),
                 "ret": round(r["ret"], 2), "spot": round(spot_px, 2), "bars": r["bars"],
                 "hold": int(r["exit_t"] - te), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
@@ -1449,6 +1517,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
             ntr += 1
             dpnl += r["net"]
             cursor = r["exit_t"]
+            size_state["cum"] += r["net"]
             if (G["day_loss"] > 0 and dpnl <= -G["day_loss"]) or (G["day_profit"] > 0 and dpnl >= G["day_profit"]):
                 break
 
@@ -1471,7 +1540,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
     out["trades"] = trades
     out["an"] = analyze(trades, cap, getattr(D, "base", BASE_TF))
     try:
-        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None)
+        out["an"]["adv"] = advanced_stats(trades, cap, days_list, (SRC_CACHE.get("v") or (None,))[0] if SRC_CACHE.get("D") is D else None, D)
     except Exception as e:
         out["an"]["adv"] = {"err": str(e)}
     eq, cum = [], 0.0
@@ -1489,7 +1558,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
 
 
 
-def advanced_stats(trades, cap, days_list, Sx=None):
+def advanced_stats(trades, cap, days_list, Sx=None, D=None):
     """Sharpe/Sortino/Calmar/SQN, E-ratio, আন্ডারওয়াটার, রেজিম, মার্জিন-ROI"""
     if not trades:
         return {}
@@ -1564,13 +1633,94 @@ def advanced_stats(trades, cap, days_list, Sx=None):
             reg["rsi"] = bucket("rsi", [40, 60], ["RSI<40", "RSI 40-60", "RSI>60"])
         except Exception:
             pass
+    # গ্যাপ রেজিম ও টাইম-ডিকে E-ratio ও টপ-৫ DD (স্পট ডেটা D লাগে)
+    try:
+        if D is not None:
+            gg = {}
+            for t in trades:
+                j = int(np.searchsorted(D.du, day_int(t["date"])))
+                if j <= 0 or j >= len(D.du):
+                    continue
+                gp = (D.dO[j] / D.dC[j - 1] - 1) * 100
+                k = "Gap-Up (>0.3%)" if gp > 0.3 else ("Gap-Down (<-0.3%)" if gp < -0.3 else "Flat গ্যাপ")
+                gg.setdefault(k, []).append(t)
+            rows = []
+            for k in ("Gap-Up (>0.3%)", "Flat গ্যাপ", "Gap-Down (<-0.3%)"):
+                if k in gg:
+                    st_ = calc_stats(gg[k], cap)
+                    rows.append({"k": k, "n": st_["n"], "win": st_["win"], "net": st_["net"], "pf": st_["pf"], "exp": st_["exp"]})
+            reg["gap"] = rows
+            ed = []
+            for h_ in (5, 15, 30, 60):
+                fav, adv, n_ = [], [], 0
+                for t in trades:
+                    sp_ = t["side"].split()
+                    if len(sp_) < 3:
+                        continue
+                    ct = D.opt.get((day_int(t["expiry"]), sp_[1], float(sp_[2])))
+                    if ct is None:
+                        continue
+                    te = day_int(t["date"]) * 1440 + hm(t["in"])
+                    j0 = int(np.searchsorted(ct[0], te))
+                    if j0 >= len(ct[0]) or ct[0][j0] != te:
+                        continue
+                    j1 = int(np.searchsorted(ct[0], te + h_, "right"))
+                    e0 = float(ct[1][j0])
+                    if e0 <= 0 or j1 <= j0:
+                        continue
+                    hh, ll = float(ct[2][j0:j1].max()), float(ct[3][j0:j1].min())
+                    sd = 1 if sp_[0] == "BUY" else -1
+                    f_, a_ = ((hh - e0), (e0 - ll)) if sd == 1 else ((e0 - ll), (hh - e0))
+                    fav.append(100 * max(f_, 0) / e0)
+                    adv.append(100 * max(a_, 0) / e0)
+                if fav:
+                    ed.append({"min": h_, "n": len(fav), "mfe": float(np.mean(fav)), "mae": float(np.mean(adv)), "ratio": float(np.mean(fav) / np.mean(adv)) if np.mean(adv) > 0 else 0.0})
+            out["eratio_decay"] = ed
+            # টপ-৫ ড্রডাউন + স্থবিরতা + সিঙ্কড চার্ট
+            dts = list(days_list) if days_list else sorted(by)
+            eqd = np.cumsum(dp)
+            pk = np.maximum.accumulate(np.r_[0.0, eqd])[1:]
+            ddd = eqd - pk
+            per, i = [], 0
+            while i < len(ddd):
+                if ddd[i] < 0:
+                    j = i
+                    while j < len(ddd) and ddd[j] < 0:
+                        j += 1
+                    seg = ddd[i:j]
+                    k_ = int(np.argmin(seg)) + i
+                    per.append({"from": dts[i - 1] if i > 0 else dts[0], "trough": dts[k_], "to": dts[j] if j < len(dts) else None, "dd": float(seg.min()), "days": int(j - i + 1)})
+                    i = j
+                else:
+                    i += 1
+            per.sort(key=lambda x: x["dd"])
+            out["top_dd"] = per[:5]
+            last_pk = 0
+            stag = 0
+            for i in range(len(eqd)):
+                if eqd[i] >= pk[i] - 1e-9 and eqd[i] > (eqd[last_pk] if last_pk < len(eqd) else -1e18) - 1e-9:
+                    stag = max(stag, (day_int(dts[i]) - day_int(dts[last_pk])))
+                    last_pk = i
+            stag = max(stag, day_int(dts[-1]) - day_int(dts[last_pk]))
+            out["stagnation_days"] = int(stag)
+            sp0 = None
+            spot_b = []
+            for dd_ in dts:
+                j = int(np.searchsorted(D.du, day_int(dd_)))
+                v = float(D.dC[min(j, len(D.dC) - 1)])
+                sp0 = v if sp0 is None else sp0
+                spot_b.append(round(cap * (v / sp0 - 1), 0))
+            step = max(1, len(dts) // 400)
+            out["sync"] = {"dates": dts[::step], "eq": [round(float(x), 0) for x in eqd[::step]], "dd": [round(float(x), 0) for x in ddd[::step]], "spot": spot_b[::step]}
+    except Exception as e:
+        out["adv_err"] = str(e)
     out["regime"] = {k: v for k, v in reg.items() if v}
     # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
-    hm = {}
+    hmap = {}
     for t in trades:
         k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
-        hm[k] = hm.get(k, 0.0) + t["net"]
-    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hm.items()]
+        hmap[k] = hmap.get(k, 0.0) + t["net"]
+    out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hmap.items()]
     mh = {}
     for t in trades:
         mh[(t["date"][:4], int(t["date"][5:7]))] = mh.get((t["date"][:4], int(t["date"][5:7])), 0.0) + t["net"]
@@ -2230,6 +2380,100 @@ def sell_preview(D, raw, date_str=None):
     stk = D.strikes.get((ex, "CE"))
     return {"date": day_str(d), "expiry": day_str(ex), "spot": round(spot, 2), "lot": lot, "legs": res, "atm_iv": round(atm_iv * 100, 2), "margin": round(m, 0),
             "T_days": round(_T_years(ex, te) * 365, 2), "rf": _RF, "strike_step": float(np.median(np.diff(stk))) if stk is not None and len(stk) > 1 else 100.0}
+
+
+
+# =====================================================================
+#  হাইব্রিড LLM কো-পাইলট (ঐচ্ছিক)। LLM কোনো গণিত করে না — শুধু (ক) আইডিয়া → Case JSON, (খ) ফলাফলের ভাষ্য।
+#  সব সংখ্যা ও যাচাই আমাদের ইঞ্জিনেই হয়; কী না থাকলে এই অংশ নিষ্ক্রিয়।
+# =====================================================================
+LLM_MODEL = "claude-sonnet-5-5"
+
+
+def llm_key(given=None):
+    if given:
+        return str(given).strip()
+    for pth in (os.environ.get("ANTHROPIC_API_KEY"), None):
+        if pth:
+            return pth.strip()
+    try:
+        d = (DATA.get("src") or {}).get("db_dir")
+        if d and os.path.exists(os.path.join(d, "llm_key.txt")):
+            return open(os.path.join(d, "llm_key.txt")).read().strip()
+    except Exception:
+        pass
+    return ""
+
+
+def llm_call(system, user, key, max_tokens=1600):
+    import requests
+    r = requests.post("https://api.anthropic.com/v1/messages",
+                      headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                      json={"model": LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
+    if r.status_code != 200:
+        raise ValueError("LLM ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+    j = r.json()
+    return "".join(b.get("text", "") for b in j.get("content", []))
+
+
+def _extract_json(txt):
+    i = txt.find("{")
+    if i < 0:
+        raise ValueError("LLM JSON ফেরত দেয়নি")
+    depth = 0
+    for k in range(i, len(txt)):
+        if txt[k] == "{":
+            depth += 1
+        elif txt[k] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(txt[i:k + 1])
+    raise ValueError("LLM-এর JSON অসম্পূর্ণ")
+
+
+def copilot_idea(text, key, caller=None):
+    caller = caller or llm_call
+    src = ", ".join(sorted(SRC_IDS - {"number"}))
+    ops = ", ".join(o[0] for o in OPS)
+    system = ("তুমি Green Bull Algo Builder-এর জন্য ট্রেডিং-আইডিয়াকে সেটিংস JSON-এ রূপান্তর করো। শুধু একটি JSON অবজেক্ট ফেরত দাও, অন্য কিছু নয়।\n"
+              "স্কিমা: {\"name\":str,\"action\":\"BUY\"|\"SELL\",\"opt\":\"CE\"|\"PE\",\"strike\":{\"mode\":\"offset\",\"off\":int}, "
+              "\"entry\":[{\"l\":src,\"op\":op,\"r\":src|\"number\",\"num\":float,\"join\":\"AND\"|\"OR\"}], \"exit\":[same],"
+              "\"sl\":{\"mode\":\"pct\"|\"pts\"|\"none\",\"val\":float},\"tp\":{...},\"trail\":{\"mode\":\"none\"|\"pct\",\"val\":float,\"act\":float},\"time_stop\":int}\n"
+              "অনুমোদিত src: %s\nঅনুমোদিত op: %s\nঅজানা কিছু বানাবে না; আইডিয়া বোঝা না গেলে {\"error\":\"কারণ\"} দাও। কোনো গাণিতিক ফলাফল দাবি করবে না।" % (src, ops))
+    out = _extract_json(caller(system, text, key))
+    if out.get("error"):
+        raise ValueError("আইডিয়া বোঝা যায়নি: %s" % out["error"])
+    c = default_case(1)
+    for k in ("name", "action", "opt"):
+        if out.get(k):
+            c[k] = out[k]
+    if isinstance(out.get("strike"), dict) and out["strike"].get("mode") == "offset":
+        c["strike"]["off"] = int(float(out["strike"].get("off", 0)))
+    for part in ("entry", "exit"):
+        if part in out:
+            lst = []
+            for x in out[part] or []:
+                if x.get("l") not in SRC_IDS or x.get("l") == "number" or x.get("op") not in {o[0] for o in OPS}:
+                    raise ValueError("LLM অবৈধ শর্ত দিয়েছে: %s" % json.dumps(x, ensure_ascii=False)[:100])
+                r = x.get("r", "number")
+                if r not in SRC_IDS:
+                    r = "number"
+                lst.append(slot(x["l"], x["op"], r, float(x.get("num", 0) or 0), join=("OR" if str(x.get("join", "AND")).upper() == "OR" else "AND")))
+            c[part] = lst
+    for k in ("sl", "tp", "trail"):
+        if isinstance(out.get(k), dict):
+            c[k].update({a: b for a, b in out[k].items() if a in c[k]})
+    if out.get("time_stop") is not None:
+        c["time_stop"] = int(float(out["time_stop"]))
+    chk = norm_settings({"cases": [c]})            # অবৈধ হলে এখানেই ValueError
+    return chk["cases"][0]
+
+
+def copilot_explain(payload, key, caller=None):
+    caller = caller or llm_call
+    system = ("তুমি একজন কোয়ান্ট-রিসার্চ সহকারী। নিচের JSON ফলাফল সহজ বাংলায় ব্যাখ্যা করো: কী ভালো, কী ঝুঁকিপূর্ণ, কোন সাজেশন বিশ্বাসযোগ্য এবং কেন। "
+              "শুধু দেওয়া সংখ্যা ব্যবহার করো, নিজে কোনো গণনা বা নতুন সংখ্যা বানাবে না, ভবিষ্যৎ-প্রতিশ্রুতি দেবে না। ৮–১২ লাইনের মধ্যে রাখো।")
+    return caller(system, json.dumps(payload, ensure_ascii=False)[:9000], key)
 
 
 # =====================================================================
@@ -2899,6 +3143,37 @@ def _sc_basic(trs, cap, min_n=1):
     return float(st["net"] / (abs(st["dd"]) + 0.02 * cap)), st
 
 
+
+def mc_fan(trades, cap, n=500, seed=7):
+    """বুটস্ট্র্যাপ Monte Carlo: ট্রেডের ক্রম ওলট-পালট করে ইকুইটির P5/P25/P50/P75/P95 ফ্যান ও DD বণ্টন"""
+    if len(trades) < 10:
+        return None
+    a = np.array([t["net"] for t in trades], float)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(a), size=(n, len(a)))
+    paths = np.cumsum(a[idx], axis=1)
+    pk = np.maximum.accumulate(np.concatenate([np.zeros((n, 1)), paths], axis=1), axis=1)[:, 1:]
+    mdd = (paths - pk).min(axis=1)
+    q = np.percentile(paths, [5, 25, 50, 75, 95], axis=0)
+    step = max(1, paths.shape[1] // 120)
+    return {"p5": q[0][::step].round(0).tolist(), "p25": q[1][::step].round(0).tolist(), "p50": q[2][::step].round(0).tolist(),
+            "p75": q[3][::step].round(0).tolist(), "p95": q[4][::step].round(0).tolist(),
+            "dd_p50": float(np.percentile(mdd, 50)), "dd_p95": float(np.percentile(mdd, 5)),
+            "end_p5": float(q[0][-1]), "end_p50": float(q[2][-1]), "end_p95": float(q[4][-1]),
+            "p_profit": float(100 * (paths[:, -1] > 0).mean()), "p_ruin": float(100 * (paths.min(axis=1) < -0.5 * cap).mean()), "n": len(a), "step": step}
+
+
+def _daily_curve(trades, dates):
+    by = {}
+    for t in trades:
+        by[t["date"]] = by.get(t["date"], 0.0) + t["net"]
+    c, out = 0.0, []
+    for d in dates:
+        c += by.get(d, 0.0)
+        out.append(round(c, 0))
+    return out
+
+
 def advise2(D, raw, opts, progress=None):
     t0 = time.time()
     base = norm_settings(raw)
@@ -3223,6 +3498,95 @@ def advise2(D, raw, opts, progress=None):
     if out.get("filter_settings_entry"):
         comb["cases"][ci]["entry"] = out["filter_settings_entry"]
     comb_tr = run(comb)["trades"]
+
+    # ---------------- ৩ক) ইন্ডিকেটর-প্যারামিটার ও এন্ট্রি-থ্রেশহোল্ড সার্চ (প্রতিবেশী-যাচাইসহ) ----------------
+    IND_MAP = {"ma1": [("ind.ma1.len", [5, 8, 9, 10, 13, 20, 21, 34, 50])], "ma2": [("ind.ma2.len", [5, 8, 9, 10, 13, 20, 21, 34, 50])], "ma3": [("ind.ma3.len", [10, 20, 21, 34, 50, 100])],
+               "rsi": [("ind.rsi.len", [7, 9, 14, 21])], "adx": [("ind.adx.len", [7, 10, 14, 20])], "dip": [("ind.adx.len", [7, 10, 14, 20])], "dim": [("ind.adx.len", [7, 10, 14, 20])],
+               "atr": [("ind.atr.len", [7, 10, 14, 20])], "bodyatr": [("ind.atr.len", [7, 10, 14, 20])],
+               "st1": [("ind.st1.len", [7, 10, 14]), ("ind.st1.mult", [1.0, 1.5, 2.0, 2.5, 3.0])], "st1dir": [("ind.st1.len", [7, 10, 14]), ("ind.st1.mult", [1.0, 1.5, 2.0, 2.5, 3.0])],
+               "st2": [("ind.st2.len", [7, 10, 14]), ("ind.st2.mult", [2.0, 2.5, 3.0, 4.0])], "st2dir": [("ind.st2.len", [7, 10, 14]), ("ind.st2.mult", [2.0, 2.5, 3.0, 4.0])],
+               "bbup": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])], "bblow": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])],
+               "bbmid": [("ind.bb.len", [14, 20, 30])], "bbw": [("ind.bb.len", [14, 20, 30]), ("ind.bb.mult", [1.5, 2.0, 2.5])],
+               "donhi": [("ind.don.n", [10, 15, 20, 30])], "donlo": [("ind.don.n", [10, 15, 20, 30])], "orbh": [("ind.orb.mins", [5, 15, 30])], "orbl": [("ind.orb.mins", [5, 15, 30])]}
+    cands_i = []
+    seen_p = set()
+    for sl_i, sl_ in enumerate(comb["cases"][ci]["entry"]):
+        if not sl_.get("on", True):
+            continue
+        for k_ in ("l", "r"):
+            for pth, gv in IND_MAP.get(sl_[k_], []):
+                if pth not in seen_p:
+                    seen_p.add(pth)
+                    cands_i.append(("ind", pth, gv))
+        if sl_["r"] == "number":
+            v0 = float(sl_.get("num", 0))
+            if sl_["l"] in ("rsi",):
+                gv = [round(v0 + d, 2) for d in (-10, -5, 5, 10)]
+            elif v0 != 0:
+                gv = [round(v0 * f, 2) for f in (0.7, 0.85, 1.15, 1.3)]
+            else:
+                gv = []
+            if gv:
+                cands_i.append(("slot", "cases.%d.entry.%d.num" % (ci, sl_i), gv))
+    ind_rows = []
+    cur_s, cur_tr = comb, comb_tr
+    n_ind = 0
+    for kind_, pth, gv in cands_i:
+        if n_ind >= 30:
+            break
+        base_v = None
+        try:
+            o_ = cur_s
+            for kk in pth.split("."):
+                o_ = o_[int(kk)] if isinstance(o_, list) else o_[kk]
+            base_v = o_
+        except Exception:
+            continue
+        r0 = robust(cur_tr)
+        best = None
+        for v in gv:
+            if v == base_v:
+                continue
+            s2 = copy.deepcopy(cur_s)
+            set_path(s2, pth, v)
+            try:
+                tr2 = run(s2)["trades"]
+            except Exception:
+                continue
+            n_ind += 1
+            rb = robust(tr2)
+            if rb is None or r0 is None:
+                continue
+            a_tr, a_te = min_split(tr2)
+            p_tr, p_te = min_split(cur_tr)
+            _, sta = ssc(a_tr); _, stp = ssc(p_tr); _, stta = ssc(a_te); _, sttp = ssc(p_te)
+            rec = {"param": pth, "from": base_v, "to": v, "d_train": float(sta["net"] - stp["net"]), "d_test": float(stta["net"] - sttp["net"]), "n": len(tr2), "rob": rb, "rob_prev": r0}
+            rec["ok"] = bool(rb > r0 * 1.05 and rec["d_test"] >= 0 and len(tr2) >= 0.6 * len(cur_tr))
+            ind_rows.append(rec)
+            if rec["ok"] and (best is None or rb > best[0]):
+                best = (rb, v, s2, tr2, rec)
+        if best:
+            # প্ল্যাটো-যাচাই: নির্বাচিত মানের দুই পাশের মান অন্তত ৮৫% স্কোর ধরে রাখতে হবে
+            gl = sorted(set([x for x in gv] + [base_v]), key=lambda z: float(z))
+            ix = gl.index(best[1])
+            nb = [gl[j] for j in (ix - 1, ix + 1) if 0 <= j < len(gl)]
+            okp = True
+            for v in nb:
+                s3 = copy.deepcopy(cur_s)
+                set_path(s3, pth, v)
+                try:
+                    r3 = robust(run(s3)["trades"])
+                except Exception:
+                    r3 = None
+                if r3 is None or r3 < best[0] * 0.85:
+                    okp = False
+            best[4]["plateau"] = bool(okp)
+            if okp:
+                best[4]["chosen"] = True
+                cur_s, cur_tr = best[2], best[3]
+    out["ind_search"] = ind_rows
+    if cur_s is not comb:
+        comb, comb_tr = cur_s, cur_tr
     def pack(trs):
         a, b2 = min_split(trs)
         return {"all": _tr(calc_stats(trs, cap)), "train": _tr(calc_stats(a, cap)), "test": _tr(calc_stats(b2, cap)),
@@ -3230,6 +3594,9 @@ def advise2(D, raw, opts, progress=None):
     out["base"] = pack(bt)
     out["exit_best"] = pack(btr)
     out["final"] = pack(comb_tr)
+    alld = sorted({t["date"] for t in bt} | {t["date"] for t in comb_tr})
+    out["curves"] = {"dates": alld, "base": _daily_curve(bt, alld), "final": _daily_curve(comb_tr, alld), "split": split_date}
+    out["mc"] = {"base": mc_fan(bt, cap), "final": mc_fan(comb_tr, cap)}
     # পরিবর্তনের তালিকা (settings diff)
     chg = []
     def addc(label, a, b2, muts):
@@ -3246,6 +3613,9 @@ def advise2(D, raw, opts, progress=None):
                                     (cp + "trail.unit", cn["trail"].get("unit", "pct")), (cp + "trail.trig", cn["trail"].get("trig")), (cp + "trail.move", cn["trail"].get("move"))])
     addc("ব্রেকইভেন", (cb["be"]["on"], cb["be"]["val"]), (cn["be"]["on"], cn["be"]["val"]), [(cp + "be.on", cn["be"]["on"]), (cp + "be.val", cn["be"]["val"])])
     addc("টাইম-স্টপ", cb.get("time_stop", 0), cn.get("time_stop", 0), [(cp + "time_stop", cn.get("time_stop", 0))])
+    for r_ in out["ind_search"]:
+        if r_.get("chosen"):
+            addc("ইন্ডিকেটর/থ্রেশহোল্ড " + r_["param"], r_["from"], r_["to"], [(r_["param"], r_["to"])])
     if out.get("filter_settings_entry") and len(out["filter_settings_entry"]) != len(cb["entry"]):
         addc("এন্ট্রি ফিল্টার", len(cb["entry"]), len(out["filter_settings_entry"]), [(cp + "entry", out["filter_settings_entry"])])
     out["changes"] = chg
@@ -3293,7 +3663,7 @@ def advise2(D, raw, opts, progress=None):
 
 PRICE_OVERLAY = {"ma1", "ma2", "ma3", "st1", "st2", "vwap", "bbup", "bbmid", "bblow", "donhi", "donlo", "orbh", "orbl",
                  "orbm", "dayo", "dayh", "dayl", "pdh", "pdl", "pdc", "pivp", "r1", "r2", "r3", "s1", "s2", "s3",
-                 "cprt", "cprb"}
+                 "cprt", "cprb", "swh", "swl"}
 PLAIN_PRICE = {"close", "open", "high", "low", "hl2", "hlc3", "ohlc4"}
 
 
@@ -4176,6 +4546,16 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
             if u.path == "/api/paper/start":
                 return self._json({"id": paper_start(body)})
+            if u.path == "/api/copilot":
+                key = llm_key(body.get("key"))
+                if not key:
+                    return self._json({"error": "API Key দেওয়া নেই (এটি ঐচ্ছিক ফিচার; অফলাইন অ্যাডভাইজার Key ছাড়াই চলে)"})
+                try:
+                    if body.get("mode") == "idea":
+                        return self._json({"case": copilot_idea(str(body.get("text", ""))[:1500], key)})
+                    return self._json({"text": copilot_explain(body.get("payload") or {}, key)})
+                except Exception as e:
+                    return self._json({"error": str(e)})
             if u.path == "/api/live/test":
                 src = DATA.get("src") or {}
                 return self._json(live_selftest(body.get("inst") or src.get("inst") or "N50", body.get("provider", "upstox")))
@@ -4539,6 +4919,9 @@ function renderBuild() {
       F('সিগন্যাল কোন চার্টে?', selCtl('general.chart', [['spot', 'স্পট (' + INAME() + ' ইনডেক্স)'], ['prem', 'প্রিমিয়াম (অপশনের নিজের চার্ট)']], () => renderBuild())),
       F('চার্ট টাইমফ্রেম', selCtl('general.tf', CTFS, null, true)),
       F('লট সংখ্যা', numCtl('general.lots', 'লট সংখ্যা', 1)),
+      F('সাইজিং মোড', selCtl('general.size_mode', [['fixed', 'ফিক্সড লট'], ['compound', 'কম্পাউন্ডিং (মূলধন বাড়লে লট বাড়ে)'], ['risk', 'মূলধনের % ঝুঁকি (SL ধরে লট)']])),
+      F('ঝুঁকি % প্রতি ট্রেড (risk মোডে)', numCtl('general.risk_pct', 'ঝুঁকি %', 0.25)),
+      F('সর্বোচ্চ লট (কম্পাউন্ড/risk মোডে)', numCtl('general.max_lots', 'সর্বোচ্চ লট', 1)),
       F('মূলধন ₹ (DD% এর জন্য)', numCtl('general.capital', 'মূলধন', 1000, true)),
       F('ডেটা শুরু (YYYY-MM-DD)', txtCtl('general.from', 'খালি = সব')),
       F('ডেটা শেষ', txtCtl('general.to', 'খালি = সব')),
@@ -4631,9 +5014,9 @@ function condBlock(ci, part, title, hint) {
 }
 
 
-const MIR_SWAP = {orbh: 'orbl', orbl: 'orbh', donhi: 'donlo', donlo: 'donhi', bbup: 'bblow', bblow: 'bbup', pdh: 'pdl', pdl: 'pdh', r1: 's1', s1: 'r1', r2: 's2', s2: 'r2', r3: 's3', s3: 'r3', cprt: 'cprb', cprb: 'cprt'};
+const MIR_SWAP = {orbh: 'orbl', orbl: 'orbh', donhi: 'donlo', donlo: 'donhi', bbup: 'bblow', bblow: 'bbup', pdh: 'pdl', pdl: 'pdh', swh: 'swl', swl: 'swh', fvgb: 'fvgs', fvgs: 'fvgb', r1: 's1', s1: 'r1', r2: 's2', s2: 'r2', r3: 's3', s3: 'r3', cprt: 'cprb', cprb: 'cprt'};
 const MIR_OP = {cross_above: 'cross_below', cross_below: 'cross_above', above: 'below', below: 'above', rising: 'falling', falling: 'rising'};
-const MIR_NEUTRAL = new Set(['adx', 'atr', 'volume', 'volsma', 'bbw', 'rng', 'body', 'bodyp', 'bodyatr', 'uw', 'lw', 'uwp', 'lwp', 'minsopen', 'cprw', 'orbr', 'gap', 'number']);
+const MIR_NEUTRAL = new Set(['adx', 'atr', 'volume', 'volsma', 'bbw', 'rng', 'body', 'bodyp', 'bodyatr', 'uw', 'lw', 'uwp', 'lwp', 'minsopen', 'cprw', 'orbr', 'gap', 'insb', 'nr7', 'rvol', 'number']);
 function mirrorCase(c) {
   const m = JSON.parse(JSON.stringify(c));
   m.opt = c.opt === 'CE' ? 'PE' : 'CE'; m.name = c.name + ' → ' + m.opt + ' মিরর';
@@ -4643,7 +5026,7 @@ function mirrorCase(c) {
     if (MIR_SWAP[s.l]) s.l = MIR_SWAP[s.l];
     if (MIR_SWAP[s.r]) s.r = MIR_SWAP[s.r];
     if (s.l === 'rsi' && s.r === 'number') s.num = Math.round((100 - s.num) * 100) / 100;
-    if (s.l === 'cdir' && s.r === 'number') s.num = -s.num;
+    if ((s.l === 'cdir' || s.l === 'bos' || s.l === 'choch') && s.r === 'number') s.num = -s.num;
   };
   (m.entry || []).forEach(fl); (m.exit || []).forEach(fl);
   return m;
@@ -4888,6 +5271,33 @@ function drawAdv(root, V) {
     root.append(h('h3', {}, '🌦 মার্কেট রেজিম অনুযায়ী (সিগন্যালের সময়ের মান)'));
     keys.forEach(k => root.append(tbl(['রেজিম', 'ট্রেড', 'Win%', 'নেট ₹', 'PF', 'গড়/ট্রেড'], R[k].map(r => [r.k, r.n, r.win.toFixed(0) + '%', pn(r.net), f2(r.pf), pn(r.exp)]))));
     root.append(h('div', {class: 'note'}, 'কোন রেজিমে নেট ঋণাত্মক হলে সেখানে এন্ট্রি ফিল্টার (যেমন ADX শর্ত) যোগ করার কথা ভাবুন — AI v2-র ফিল্টার মাইনিং এটা যাচাই করে দেখে।'));
+  }
+  if (V.sync) {
+    root.append(h('h3', {}, '📈 ইকুইটি + আন্ডারওয়াটার DD + স্পট বেঞ্চমার্ক'));
+    const c3 = h('canvas', {style: 'width:100%;height:260px;background:#10151d;border-radius:10px'}); root.append(c3);
+    root.append(h('div', {class: 'note'}, 'সবুজ = আপনার ইকুইটি; ধূসর = স্পট ইনডেক্স (একই মূলধনে বাই-অ্যান্ড-হোল্ড); নিচের লাল অংশ = ডড্রডাউন (শিখর থেকে কত নিচে)।'));
+    setTimeout(() => {
+      const W = c3.clientWidth || 340, H = 260, dpr = Math.min(window.devicePixelRatio || 1, 2); c3.width = W * dpr; c3.height = H * dpr; const g = c3.getContext('2d'); g.scale(dpr, dpr);
+      const Y1 = V.sync, n = Y1.eq.length, L = 8, R = 8, top = 8, split = H * 0.68, bot = H - 14;
+      const a1 = Y1.eq.concat(Y1.spot, [0]), mx = Math.max(...a1), mn = Math.min(...a1), dm = Math.min(...Y1.dd, -1);
+      const X = i => L + (W - L - R) * i / Math.max(n - 1, 1), Ya = v => top + (split - top - 6) * (1 - (v - mn) / Math.max(mx - mn, 1)), Yb = v => split + 8 + (bot - split - 8) * (v / dm);
+      g.strokeStyle = '#1c2431'; g.beginPath(); g.moveTo(L, Ya(0)); g.lineTo(W - R, Ya(0)); g.stroke();
+      const ln = (arr, col, f, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(X(i), f(v)) : g.moveTo(X(i), f(v))); g.stroke(); };
+      ln(Y1.spot, '#8b96a8', Ya, 1.2); ln(Y1.eq, '#26c281', Ya, 2);
+      g.fillStyle = 'rgba(255,93,93,.35)'; g.beginPath(); g.moveTo(X(0), Yb(0)); Y1.dd.forEach((v, i) => g.lineTo(X(i), Yb(v))); g.lineTo(X(n - 1), Yb(0)); g.closePath(); g.fill();
+      g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'left'; g.fillText(Y1.dates[0], L, H - 2); g.textAlign = 'right'; g.fillText(Y1.dates[n - 1], W - R, H - 2);
+      g.textAlign = 'left'; g.fillText(Math.round(mx).toLocaleString('en-IN'), L + 2, top + 8); g.fillText(Math.round(dm).toLocaleString('en-IN'), L + 2, bot - 2);
+    }, 0);
+  }
+  if (V.top_dd && V.top_dd.length) {
+    root.append(h('h3', {}, '🕳 টপ-৫ ড্রডাউন পিরিয়ড ও স্থবিরতা'));
+    root.append(tbl(['শুরু', 'তলা', 'পুনরুদ্ধার', 'DD ₹', 'দিন'], V.top_dd.map(d => [d.from, d.trough, d.to || 'এখনও হয়নি', pn(d.dd), d.days])));
+    root.append(h('div', {class: 'note'}, 'ইকুইটি নতুন শিখর না ছুঁয়ে সর্বোচ্চ ' + V.stagnation_days + ' ক্যালেন্ডার দিন কেটেছে — এই ধৈর্য আপনার আছে কি না আগে ভেবে নিন।'));
+  }
+  if (V.eratio_decay && V.eratio_decay.length) {
+    root.append(h('h3', {}, '⏱ টাইম-ডিকে E-Ratio (এন্ট্রির পর গড় MFE ÷ MAE)'));
+    root.append(tbl(['এন্ট্রির পর', 'ট্রেড', 'গড় MFE %', 'গড় MAE %', 'E-ratio'], V.eratio_decay.map(e => [e.min + ' মিনিট', e.n, e.mfe.toFixed(1), e.mae.toFixed(1), '<b>' + e.ratio.toFixed(2) + '</b>'])));
+    root.append(h('div', {class: 'note'}, 'প্রিমিয়ামের শতাংশে। ১-এর বেশি এবং সময়ের সাথে বাড়লে এন্ট্রি-সিগন্যালে সত্যিকারের এজ আছে; কোন মিনিটে ratio সর্বোচ্চ সেটাই আদর্শ টাইম-স্টপের ইঙ্গিত।'));
   }
   /* MAE/MFE স্ক্যাটার */
   root.append(h('h3', {}, '🎯 MAE বনাম MFE (প্রতি ট্রেড)'));
@@ -5320,6 +5730,7 @@ function renderSweep() {
     R.paths.forEach((p, i) => setp(p, r.vals[i]));
     renderBuild(); showTab('build'); $('#status').textContent = 'সেটিং লাগানো হয়েছে, ▶ Run চাপুন';
   });
+  drawSweepViz(box, R);
   box.append(t, h('div', {class: 'note'}, '✓ = নেট লাভ, PF ≥ ১.২ এবং অন্তত অর্ধেক মাস লাভে। সবচেয়ে ভালো একটা সংখ্যার দিকে না তাকিয়ে এমন মান বাছুন যার আশেপাশের মানগুলোও ভালো, তাতে ভাগ্যের ওপর নির্ভরতা কমে।'));
 }
 
@@ -5394,6 +5805,48 @@ function renderData() {
 }
 
 
+
+
+/* ---------- Optimize: 2D Heatmap ও 1D স্টেবিলিটি কার্ভ ---------- */
+let HMM = 'net';
+const HM_METRICS = {net: ['নেট ₹', r => r.all.net], pf: ['Profit Factor', r => r.all.pf], rec: ['Recovery', r => r.all.rec], dd: ['Max DD (কম লস = ভালো)', r => r.all.dd], win: ['Win %', r => r.all.win], test: ['TEST নেট ₹', r => r.test.net]};
+function hmColor(t) { t = Math.max(0, Math.min(1, t)); const a = t < .5 ? [214, 69, 65] : [241, 196, 15], b = t < .5 ? [241, 196, 15] : [38, 194, 129], k = t < .5 ? t * 2 : (t - .5) * 2; return 'rgb(' + a.map((x, i) => Math.round(x + (b[i] - x) * k)).join(',') + ')'; }
+function drawSweepViz(box, R) {
+  if (R.paths.length > 2) return;
+  const wrap = h('div'); box.append(h('h3', {}, R.paths.length === 2 ? '🟩 2D Parameter Heatmap' : '📈 স্টেবিলিটি কার্ভ (প্ল্যাটো খুঁজুন)'), wrap);
+  const sel = h('select', {on: {change: e => { HMM = e.target.value; draw(); }}}, ...Object.entries(HM_METRICS).map(([k, v]) => h('option', {value: k}, v[0]))); sel.value = HMM;
+  wrap.append(F('মেট্রিক', sel)); const area = h('div'); wrap.append(area);
+  function draw() {
+    area.innerHTML = ''; const f = HM_METRICS[HMM][1], rows = R.rows.filter(r => r.all.n >= 1);
+    if (!rows.length) return;
+    if (R.paths.length === 2) {
+      const xs = [...new Set(rows.map(r => r.vals[0]))].sort((a, b) => a - b), ys = [...new Set(rows.map(r => r.vals[1]))].sort((a, b) => a - b), m = {};
+      rows.forEach(r => m[r.vals[0] + '|' + r.vals[1]] = r);
+      const vs = rows.map(f), mn = Math.min(...vs), mx = Math.max(...vs);
+      let html = '<table style="border-collapse:separate;border-spacing:2px"><tr><th>' + R.labels[1].replace(/\[.*?\]/, '') + ' ↓ / ' + R.labels[0].replace(/\[.*?\]/, '') + ' →</th>' + xs.map(x => '<th>' + x + '</th>').join('') + '</tr>';
+      ys.forEach(y => { html += '<tr><th>' + y + '</th>' + xs.map(x => { const r = m[x + '|' + y]; if (!r) return '<td></td>'; const v = f(r); return '<td data-k="' + x + '|' + y + '" style="background:' + hmColor((v - mn) / Math.max(mx - mn, 1e-9)) + ';color:#06140c;text-align:center;font-weight:600;cursor:pointer;padding:6px 3px;border-radius:5px;font-size:11px">' + (Math.abs(v) >= 1000 ? Math.round(v / 1000) + 'k' : (Math.abs(v) < 10 ? v.toFixed(2) : Math.round(v))) + '</td>'; }).join('') + '</tr>'; });
+      const t = h('div', {class: 'scroll', html: html + '</table>'}); const det = h('div');
+      t.addEventListener('click', e => { const td = e.target.closest('td[data-k]'); if (!td) return; const r = m[td.dataset.k]; det.innerHTML = '';
+        det.append(tbl(['', 'সব', 'Train', 'Test'], [['ট্রেড', r.all.n, r.train.n, r.test.n], ['নেট', pn(r.all.net), pn(r.train.net), pn(r.test.net)], ['PF', f2(r.all.pf), f2(r.train.pf), f2(r.test.pf)], ['Win%', r.all.win.toFixed(0), r.train.win.toFixed(0), r.test.win.toFixed(0)], ['DD', inr(r.all.dd), inr(r.train.dd), inr(r.test.dd)]]));
+        det.append(h('button', {class: 'btn p', on: {click: () => { R.paths.forEach((p, i) => setp(p, r.vals[i])); renderBuild(); showTab('build'); $('#status').textContent = 'সেটিং লাগানো হয়েছে, ▶ Run চাপুন'; }}}, '✔ এই সেটিং প্রয়োগ (' + r.vals.join(', ') + ')')); });
+      area.append(t, det, h('div', {class: 'note'}, 'লাল = খারাপ, সবুজ = ভালো। একক উজ্জ্বল সবুজ ঘর (চারপাশে লাল) = স্পাইক, ওভারফিটের ঝুঁকি; পাশাপাশি অনেক সবুজ ঘরের চওড়া এলাকা = টেকসই প্ল্যাটো — তার মাঝখান থেকে বাছুন।'));
+    } else {
+      const cv = h('canvas', {style: 'width:100%;height:200px;background:#10151d;border-radius:10px'}); area.append(cv, h('div', {class: 'note'}, 'সবুজ = মেট্রিক; হলুদ ড্যাশ = ৩-বিন্দু গড় (স্মুথ); নীল রেখা = এখনকার মান। মসৃণ উঁচু এলাকা চাই, একক চূড়া নয়।'));
+      const rs = rows.slice().sort((a, b) => a.vals[0] - b.vals[0]), v = rs.map(f), sm = v.map((_, i) => { const a = v.slice(Math.max(0, i - 1), i + 2); return a.reduce((x, y) => x + y, 0) / a.length; });
+      setTimeout(() => {
+        const W = cv.clientWidth || 340, H = 200, dpr = Math.min(window.devicePixelRatio || 1, 2); cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+        const mn = Math.min(...v, ...sm), mx = Math.max(...v, ...sm), x0 = rs[0].vals[0], x1 = rs[rs.length - 1].vals[0], L = 34, R_ = 8, T = 10, B = 20;
+        const X = a => L + (W - L - R_) * (rs.length === 1 ? .5 : (a - x0) / Math.max(x1 - x0, 1e-9)), Y = a => T + (H - T - B) * (1 - (a - mn) / Math.max(mx - mn, 1e-9));
+        g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'right'; g.fillText(Math.abs(mx) < 10 ? mx.toFixed(2) : Math.round(mx), L - 3, T + 6); g.fillText(Math.abs(mn) < 10 ? mn.toFixed(2) : Math.round(mn), L - 3, H - B);
+        g.textAlign = 'center'; rs.forEach((r, i) => { if (rs.length < 14 || i % 2 === 0) g.fillText(r.vals[0], X(r.vals[0]), H - 6); });
+        const cur = getp(R.paths[0]); if (isFinite(cur)) { g.strokeStyle = '#4f9cff'; g.beginPath(); g.moveTo(X(cur), T); g.lineTo(X(cur), H - B); g.stroke(); }
+        const ln = (arr, col, dash) => { g.strokeStyle = col; g.setLineDash(dash); g.lineWidth = 2; g.beginPath(); arr.forEach((a, i) => i ? g.lineTo(X(rs[i].vals[0]), Y(a)) : g.moveTo(X(rs[i].vals[0]), Y(a))); g.stroke(); g.setLineDash([]); };
+        ln(sm, '#f1c40f', [5, 3]); ln(v, '#26c281', []); g.fillStyle = '#26c281'; rs.forEach((r, i) => { g.beginPath(); g.arc(X(r.vals[0]), Y(v[i]), 3, 0, 7); g.fill(); });
+      }, 0);
+    }
+  }
+  draw();
+}
 
 /* ---------- 🧩 Option Selling Lab (Sensibull-ধাঁচ) ---------- */
 let SELL = null, SELLR = null, SELLP = null, SELLW = {spot: 0, iv: 0, day: 0};
@@ -5586,6 +6039,49 @@ function drawAI2(root, A) {
     root.append(h('h3', {}, 'ফিল্টার মাইনিং (আসল ইঞ্জিনে যাচাই)'));
     root.append(tbl(['অতিরিক্ত শর্ত', 'ট্রেড', 'TRAIN Δ', 'TEST Δ', 'রায়'], A.filters.map(f => [f.rule, f.n, pc(f.d_train), pc(f.d_test), f.chosen ? '✔ নির্বাচিত' : (f.ok ? '✓ ভালো' : '✗')])));
   }
+  if (A.curves) {
+    root.append(h('h3', {}, '📊 বর্তমান বনাম সাজেশন — ইকুইটি (সময় অনুযায়ী)'));
+    const c1 = h('canvas', {style: 'width:100%;height:210px;background:#10151d;border-radius:10px'}); root.append(c1);
+    root.append(h('div', {class: 'note'}, 'ধূসর = বর্তমান সেটিং, সবুজ = সাজেশন (এক্সিট + ফিল্টার)। হলুদ খাড়া রেখার ডানদিক = TEST (বাছাইয়ে অদেখা অংশ) — সবুজ রেখা ডানদিকেও ওপরে থাকলেই ভরসা।'));
+    setTimeout(() => {
+      const C = A.curves, W = c1.clientWidth || 340, H = 210, dpr = Math.min(window.devicePixelRatio || 1, 2); c1.width = W * dpr; c1.height = H * dpr; const g = c1.getContext('2d'); g.scale(dpr, dpr);
+      const n = C.dates.length, all = C.base.concat(C.final, [0]), mx = Math.max(...all), mn = Math.min(...all), L = 8, R = 8, T = 8, B = 16;
+      const X = i => L + (W - L - R) * i / Math.max(n - 1, 1), Y = v => T + (H - T - B) * (1 - (v - mn) / Math.max(mx - mn, 1));
+      g.strokeStyle = '#1c2431'; g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(W - R, Y(0)); g.stroke();
+      const ln = (arr, col, w) => { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); };
+      ln(C.base, '#8b96a8', 1.5); ln(C.final, '#26c281', 2.2);
+      if (C.split) { const k = C.dates.findIndex(d => d >= C.split); if (k > 0) { g.strokeStyle = '#f1c40f'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(X(k), T); g.lineTo(X(k), H - B); g.stroke(); g.setLineDash([]); } }
+      g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'left'; g.fillText(C.dates[0], L, H - 3); g.textAlign = 'right'; g.fillText(C.dates[n - 1], W - R, H - 3);
+    }, 0);
+  }
+  if (A.mc && A.mc.final) {
+    const M = A.mc.final, Mb = A.mc.base;
+    root.append(h('h3', {}, '🌫 Monte Carlo ফ্যান (সাজেশন, ' + M.n + ' ট্রেডের ক্রম ওলট-পালট × ৫০০)'));
+    const c2 = h('canvas', {style: 'width:100%;height:210px;background:#10151d;border-radius:10px'}); root.append(c2);
+    setTimeout(() => {
+      const W = c2.clientWidth || 340, H = 210, dpr = Math.min(window.devicePixelRatio || 1, 2); c2.width = W * dpr; c2.height = H * dpr; const g = c2.getContext('2d'); g.scale(dpr, dpr);
+      const n = M.p50.length, all = M.p5.concat(M.p95, [0]), mx = Math.max(...all), mn = Math.min(...all), L = 8, R = 8, T = 8, B = 8;
+      const X = i => L + (W - L - R) * i / Math.max(n - 1, 1), Y = v => T + (H - T - B) * (1 - (v - mn) / Math.max(mx - mn, 1));
+      const band = (a, b, col) => { g.fillStyle = col; g.beginPath(); a.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); for (let i = n - 1; i >= 0; i--) g.lineTo(X(i), Y(b[i])); g.closePath(); g.fill(); };
+      band(M.p95, M.p5, 'rgba(38,194,129,.16)'); band(M.p75, M.p25, 'rgba(38,194,129,.30)');
+      g.strokeStyle = '#1c2431'; g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(W - R, Y(0)); g.stroke();
+      g.strokeStyle = '#26c281'; g.lineWidth = 2; g.beginPath(); M.p50.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke();
+      g.strokeStyle = '#ff5d5d'; g.lineWidth = 1; g.setLineDash([3, 3]); g.beginPath(); M.p5.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); g.setLineDash([]);
+    }, 0);
+    root.append(tbl(['', 'বর্তমান', 'সাজেশন'], [['শেষে নেট — খারাপ ৫% (P5)', pn(Mb ? Mb.end_p5 : 0), pn(M.end_p5)], ['শেষে নেট — মধ্যম (P50)', pn(Mb ? Mb.end_p50 : 0), pn(M.end_p50)], ['শেষে নেট — ভালো ৫% (P95)', pn(Mb ? Mb.end_p95 : 0), pn(M.end_p95)],
+      ['Max DD — মধ্যম', inr(Mb ? Mb.dd_p50 : 0), inr(M.dd_p50)], ['Max DD — খারাপ ৫%', inr(Mb ? Mb.dd_p95 : 0), inr(M.dd_p95)], ['লাভে শেষ হওয়ার সম্ভাবনা', (Mb ? Mb.p_profit.toFixed(0) : '–') + '%', M.p_profit.toFixed(0) + '%'], ['মূলধনের ৫০% হারানোর সম্ভাবনা', (Mb ? Mb.p_ruin.toFixed(1) : '–') + '%', M.p_ruin.toFixed(1) + '%']]));
+    root.append(h('div', {class: 'note'}, 'সবুজ ছায়া: ৫০% ও ৯০% সম্ভাব্য পরিসর; লাল ড্যাশ = খারাপ ৫% পথ। এটা ঐতিহাসিক ট্রেড থেকে নমুনা নেওয়া, ভবিষ্যৎ-নিশ্চয়তা নয়।'));
+  }
+  if (A.ablation && A.ablation.length) {
+    root.append(h('h3', {}, '📊 Rule Ablation বার চার্ট (শর্ত বন্ধ করলে নেট কত বদলায়)'));
+    const mxA = Math.max(...A.ablation.map(a => Math.abs(a.d_net)), 1);
+    root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('div', {style: 'flex:1 1 100%', html: A.ablation.map(a => '<div style="margin:5px 0"><div style="font-size:11.5px">' + a.rule + ' <b class="' + (a.d_net <= 0 ? 'pos' : 'neg') + '">' + (a.d_net <= 0 ? 'কাজের শর্ত' : 'ক্ষতিকর হতে পারে') + '</b></div><div style="height:12px;border-radius:6px;background:#1a2230;position:relative"><div style="position:absolute;top:0;height:12px;border-radius:6px;width:' + (Math.abs(a.d_net) / mxA * 48) + '%;' + (a.d_net >= 0 ? 'left:50%;background:#ff5d5d' : 'right:50%;background:#26c281') + '"></div></div></div>').join('')}))));
+  }
+  if (A.ind_search && A.ind_search.length) {
+    root.append(h('h3', {}, 'ইন্ডিকেটর ও থ্রেশহোল্ড সার্চ'));
+    root.append(tbl(['প্যারামিটার', 'এখন', 'চেষ্টা', 'TRAIN Δ', 'TEST Δ', 'রায়'], A.ind_search.map(r => [r.param.replace('cases.', 'কেস.').replace('.entry.', '.শর্ত.'), r.from, r.to, pc(r.d_train), pc(r.d_test), r.chosen ? '✔ নির্বাচিত' : (r.ok ? (r.plateau === false ? '✗ স্পাইক (প্ল্যাটো নেই)' : '✓') : '✗')])));
+    root.append(h('div', {class: 'note'}, 'প্রতিটি মান আসল ইঞ্জিনে চলেছে; নির্বাচনের আগে দুই পাশের প্রতিবেশী মানও ≥৮৫% স্কোর রাখতে হয় — একক চূড়া (স্পাইক) বাদ।'));
+  }
   const W = A.wfo;
   root.append(h('h3', {}, 'রোলিং Walk-Forward (অদেখা সময়ে পরীক্ষা)'));
   root.append(tbl(['ট্রেন', 'টেস্ট', 'OOS নেট (টিউন)', 'OOS নেট (বর্তমান)', 'ট্রেড'], W.windows.map(w => [w.train, w.test, pc(w.net_oos), pc(w.net_base), w.n_oos])));
@@ -5627,6 +6123,16 @@ function renderAI() {
     }}}, '🔬 গভীর বিশ্লেষণ (v2)'),
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'রুল অ্যাব্লেশন (কোন এন্ট্রি-শর্ত আসলে কাজ করছে), ফিল্টার মাইনিং, স্মার্ট সার্চ ও রোলিং Walk-Forward। কমপক্ষে ~৫০ ট্রেড দরকার।'))));
   if (AIR2) drawAI2(root, AIR2);
+  /* ---- LLM কো-পাইলট (ঐচ্ছিক) ---- */
+  const lk = h('input', {type: 'password', placeholder: 'Anthropic API Key (ঐচ্ছিক, শুধু এই ফোনে থাকে)', style: 'flex:1 1 100%'}); try { lk.value = localStorage.getItem('gb_llm_key') || ''; } catch (e) {}
+  lk.addEventListener('change', () => { try { localStorage.setItem('gb_llm_key', lk.value.trim()); } catch (e) {} });
+  const li = h('textarea', {rows: 2, placeholder: 'আইডিয়া লিখুন, যেমন: "১৫ মিনিটের ORB ব্রেকআউটে ADX ২০-র ওপরে হলে CE কিনব"', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
+  const lo = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'});
+  root.append(h('div', {class: 'h2'}, '🤖 LLM কো-পাইলট (ঐচ্ছিক)'));
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, lk, li,
+    h('button', {class: 'btn p', on: {click: async () => { lo.textContent = 'ভাবছে…'; const r = await api('/api/copilot', {mode: 'idea', text: li.value, key: lk.value.trim()}); if (r.error) { lo.textContent = '⚠ ' + r.error; return; } S.cases.push(r.case); persist(); renderBuild(); lo.textContent = '✓ নতুন Case যোগ হয়েছে: ' + r.case.name + ' — Strategy ট্যাবে দেখে নিন, তারপর Run দিন।'; }}}, '💡 আইডিয়া → Case'),
+    h('button', {class: 'btn s', on: {click: async () => { if (!AIR2 && !AIR) { lo.textContent = 'আগে অ্যাডভাইজার চালান।'; return; } lo.textContent = 'ব্যাখ্যা তৈরি হচ্ছে…'; const A = AIR2 || AIR; const pl = AIR2 ? {validation: A.validation, base: A.base, final: A.final, wfo: A.wfo, changes: A.changes, ablation: A.ablation} : {validation: A.validation, changes: A.changes}; const r = await api('/api/copilot', {mode: 'explain', payload: pl, key: lk.value.trim()}); lo.textContent = r.error ? '⚠ ' + r.error : r.text; lo.style.whiteSpace = 'pre-wrap'; }}}, '🗣 ফলাফল ব্যাখ্যা'),
+    lo, h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'LLM কোনো গণিত করে না — শুধু আইডিয়াকে Case-এ রূপ দেয় (আমাদের ইঞ্জিন যাচাই করে) ও ফলাফল বোঝায়। Key ইন্টারনেটের মাধ্যমে Anthropic-এ যায়; না দিলে পুরো সিস্টেম আগের মতোই অফলাইনে চলে।'))));
   /* ---- অনুরোধ বাক্স ---- */
   const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
   const send = async txt => {
