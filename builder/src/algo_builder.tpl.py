@@ -80,13 +80,14 @@ def hm(s):
     return int(a) * 60 + int(b)
 
 
-def _spot_finish(D, log):
+def _spot_finish(D, log, view=False):
     """D.t/o/h/l/c/v ভরা থাকলে বাকি স্পট-হিসাব (দিন, BASE_TF, দৈনিক OHLC) বানায়"""
     D.day = D.t // 1440
     D.mod = D.t % 1440
     global BASE_TF
-    dd = np.diff(D.t)[np.diff(D.day) == 0]
-    BASE_TF = int(np.median(dd)) if len(dd) else 5
+    if not view:
+        dd = np.diff(D.t)[np.diff(D.day) == 0]
+        BASE_TF = int(np.median(dd)) if len(dd) else 5
     D.base = BASE_TF
     D.du = np.unique(D.day)
     st = np.flatnonzero(np.r_[True, D.day[1:] != D.day[:-1]])
@@ -967,7 +968,7 @@ SRC_CACHE = {}
 ADV_CACHE = {}
 
 
-def backtest(D, raw, light=False, progress=None):
+def backtest(D, raw, light=False, progress=None, now=None):
     st = norm_settings(raw)
     G = st["general"]
     PM = G.get("chart") == "prem"
@@ -1148,9 +1149,11 @@ def backtest(D, raw, light=False, progress=None):
             if cur is None:
                 return new
             return max(cur, new) if side == 1 else min(cur, new)
-        while jj < nb and t[jj] < day_end:
+        while jj < nb and t[jj] < day_end and (now is None or t[jj] <= now):
             s = int(t[jj])
             oo, hh, ll = float(o[jj]), float(h[jj]), float(l[jj])
+            if now is not None and s == now:
+                hh = ll = oo       # চলতি মিনিটের শুধু open জানা (লাইভে হাই/লো এখনো গঠনাধীন)
             full = None
             if jj > j:
                 if s % 1440 >= sq:
@@ -1248,9 +1251,15 @@ def backtest(D, raw, light=False, progress=None):
             if lvl is not None:
                 sl = tighten(sl, lvl)
             jj += 1
+        is_open = False
         if exit_idx is None:
             exit_idx = jj - 1
-            reason, px = "Day End", float(c[exit_idx])
+            if now is not None and (now % 1440) < sq:
+                is_open = True       # ট্রেড এখনো চলছে (পেপার/লাইভ) — চলতি দামে MTM
+                reason = "OPEN"
+                px = float(o[exit_idx]) if int(t[exit_idx]) == now else float(c[exit_idx])
+            else:
+                reason, px = "Day End", float(c[exit_idx])
             legs.append((rem, px, int(t[exit_idx]), reason))
         entry_eff = raw_e + side * slip
         qty = L * lot
@@ -1272,7 +1281,7 @@ def backtest(D, raw, light=False, progress=None):
         costs += G["charges_pct"] / 100.0 * sell_turn
         exit_eff = (legs[0][1] - side * slip) if len(legs) == 1 else (wsum / qty if qty else 0.0)
         return dict(exit_t=int(t[exit_idx]), exit_px=float(px), entry_eff=entry_eff, exit_eff=exit_eff,
-                    reason=reason, qty=qty, gross=float(gross), costs=float(costs), net=float(gross - costs),
+                    reason=reason, qty=qty, gross=float(gross), costs=float(costs), net=float(gross - costs), is_open=is_open, rem=int(rem), sl_now=(float(sl) if sl is not None else None), tp_now=(float(tp) if tp is not None else None),
                     bars=int(exit_idx - j + 1), mae=float(mae / raw_e * 100) if raw_e else 0.0,
                     mfe=float(mfe / raw_e * 100) if raw_e else 0.0,
                     rret=float((raw_w / L - raw_e) * side / raw_e * 100) if raw_e and L else 0.0, legs=ltxt if len(ltxt) > 1 else None,
@@ -1362,6 +1371,8 @@ def backtest(D, raw, light=False, progress=None):
                 ii, k = best
                 ci, cs, sg, xs = cases[k]
                 te = int(B.e[ii])
+                if now is not None and te > now:
+                    break
                 pk = pick(cs, ex, te, float(B.c[ii]))
                 if pk is None or pk == "nostrike":
                     skipped["ডেটা নেই (কন্ট্র্যাক্টে বার নেই)" if pk is None else "স্ট্রাইক পাওয়া যায়নি"] += 1
@@ -1383,7 +1394,8 @@ def backtest(D, raw, light=False, progress=None):
                 "hold": r["bars"] * BASE_TF, "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
                 "rret": round(r["rret"], 2),
                 "r": round(r["net"] / r["risk"], 2) if r["risk"] else None,
-                "dte": int(ex - d), "dow": DOWN[(d + 3) % 7], "legs": r["legs"]})
+                "dte": int(ex - d), "dow": DOWN[(d + 3) % 7], "legs": r["legs"],
+                "open": bool(r["is_open"]), "rem": r["rem"], "slx": r.get("sl_now"), "tpx": r.get("tp_now")})
             ntr += 1
             dpnl += r["net"]
             cursor = r["exit_t"]
@@ -1402,6 +1414,8 @@ def backtest(D, raw, light=False, progress=None):
                     "skipped": skipped, "cases_active": len(cases),
                     "warn": (["আংশিক প্রফিট বুকিং চালু, কিন্তু লট ১ — ভাগ করা যায় না। লট কমপক্ষে ২ দিন।"]
                              if G["lots"] < 2 and any(c["on"] and c["tg"]["on"] for c in st["cases"]) else [])}}
+    if light == "trades":
+        return {"trades": trades}
     if light:
         return out
     out["trades"] = trades
@@ -2317,6 +2331,482 @@ def run_multi(payload, prog):
     return {"rows": rows}
 
 
+# =====================================================================
+#  পেপার ট্রেডিং (রিপ্লে + লাইভ)
+#  নীতি: কোনো আলাদা "লাইভ লজিক" নেই। প্রতি টিকে ব্যাকটেস্ট ইঞ্জিনকেই আজকের দিনের জন্য, "এখন পর্যন্ত জানা ডেটা"
+#  দিয়ে চালানো হয় (স্পট শুধু সম্পূর্ণ হওয়া চার্ট বার; চলতি মিনিটের শুধু open)। তাই পেপারের ফল ও ব্যাকটেস্ট
+#  একই কোড থেকে আসে, আর অবস্থা (state) ফাইলে না রেখে প্রতিবার নতুন হিসাব — রিস্টার্টে কিছু হারায় না।
+# =====================================================================
+PAPER = {"sess": None, "stop": False, "thread": None}
+PLOCK = threading.Lock()
+
+
+def paper_dir():
+    src = DATA.get("src") or {}
+    d = os.path.join(src.get("db_dir") or os.getcwd(), "paper")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def paper_view(D, now, tf, warm=25):
+    """'now' মিনিট পর্যন্ত যা জানা, শুধু সেটুকুর স্পট ডেটা-অবজেক্ট (অপশন ডেটা শেয়ার্ড)।"""
+    day = now // 1440
+    i0 = int(np.searchsorted(D.day, day - warm, "left"))
+    i1 = int(np.searchsorted(D.t, (day + 1) * 1440, "left"))
+    t = D.t[i0:i1]
+    m = t % 1440
+    bs = OPEN_MIN + ((m - OPEN_MIN) // tf) * tf
+    keep = (t // 1440 < day) | (bs + tf <= now % 1440)
+    V = Data()
+    V._bars, V._cache = {}, {}
+    V.t = t[keep]
+    V.o, V.h, V.l, V.c, V.v = (a[i0:i1][keep] for a in (D.o, D.h, D.l, D.c, D.v))
+    _spot_finish(V, lambda *a: None, view=True)
+    V.opt, V.strikes, V.exp_lot, V.exp_range, V.expiries = D.opt, D.strikes, D.exp_lot, D.exp_range, D.expiries
+    return V
+
+
+def paper_eval(D, settings, now):
+    """আজকের (now-এর দিনের) ট্রেড-তালিকা, এখন পর্যন্ত জানা তথ্যে।"""
+    st = copy.deepcopy(settings)
+    G = st["general"]
+    day = now // 1440
+    G["from"] = G["to"] = day_str(day)
+    tf = int(float(G["tf"]))
+    with RUN_LOCK:
+        V = paper_view(D, now, tf)
+        return backtest(V, st, light="trades", now=now)["trades"]
+
+
+def _tkey(t):
+    return (t["date"], t["in"], t["side"], t["case"])
+
+
+def paper_diff(sess, today, now):
+    """আগের টিকের সাথে তুলনা করে ঘটনা-লগ (ENTRY / PARTIAL / EXIT) বানায়।"""
+    prev = sess.get("_prev", {})
+    cur = {}
+    for t in today:
+        k = _tkey(t)
+        nl = len(t["legs"]) if t.get("legs") else 1
+        cur[k] = (bool(t["open"]), nl)
+        if k not in prev:
+            paper_event(sess, now, "ENTRY", "%s %s | ইন %s @ %.2f | %d লট" % (t["case"], t["side"], t["in"], t["entry"], t["lots"]))
+            if not t["open"]:
+                paper_event(sess, now, "EXIT", "%s | %s @ %.2f | নেট %+.0f" % (t["side"], t["reason"], t["exit"], t["net"]))
+        else:
+            po, pl = prev[k]
+            if po and not t["open"]:
+                paper_event(sess, now, "EXIT", "%s | %s @ %.2f | নেট %+.0f" % (t["side"], t["reason"], t["exit"], t["net"]))
+            elif t["open"] and nl > pl:
+                paper_event(sess, now, "PARTIAL", "%s | আংশিক বুকিং (লেগ %d)" % (t["side"], nl))
+    sess["_prev"] = cur
+
+
+def paper_event(sess, now, kind, msg):
+    with PLOCK:
+        sess["events"].append({"t": hm_str(now), "day": day_str(now // 1440), "k": kind, "msg": msg})
+        del sess["events"][:-400]
+
+
+def paper_tick(sess, D, now):
+    today = paper_eval(D, sess["settings"], now)
+    paper_diff(sess, today, now)
+    with PLOCK:
+        sess["now"] = int(now)
+        sess["day"] = day_str(now // 1440)
+        sess["today"] = [t for t in today]
+        sess["open"] = next((t for t in today if t["open"]), None)
+    return today
+
+
+def paper_finalize_day(sess, today):
+    with PLOCK:
+        done = [t for t in today if not t["open"]]
+        sess["closed"].extend(done)
+        sess["days_done"] = sess.get("days_done", 0) + 1
+        sess["_prev"] = {}
+        sess["today"], sess["open"] = [], None
+    paper_save(sess)
+
+
+def paper_save(sess):
+    try:
+        slim = {k: v for k, v in sess.items() if not k.startswith("_")}
+        with open(os.path.join(paper_dir(), "%s.json" % sess["id"]), "w", encoding="utf-8") as f:
+            json.dump(clean(slim), f, ensure_ascii=False)
+    except Exception:
+        traceback.print_exc()
+
+
+def paper_replay(sess):
+    D = DATA["D"]
+    st = sess["settings"]
+    G = st["general"]
+    tf = int(float(G["tf"]))
+    sq = hm(G["sqoff"])
+    d0, d1 = day_int(sess["from"]), day_int(sess["to"])
+    days = [d for d in D.du.tolist() if d0 <= d <= d1]
+    sess["n_days"] = len(days)
+    step = max(int(sess.get("step", tf)), 1)
+    delay = float(sess.get("delay", 0))
+    for d in days:
+        if PAPER["stop"]:
+            break
+        now = d * 1440 + OPEN_MIN + tf
+        end = d * 1440 + sq
+        today = []
+        while now < end and not PAPER["stop"]:
+            today = paper_tick(sess, D, now)
+            if delay:
+                time.sleep(delay)
+            now += step
+        if PAPER["stop"]:
+            break
+        today = paper_tick(sess, D, end)
+        paper_finalize_day(sess, today)
+
+
+# ---------------------------------------------------------------------
+#  লাইভ ফিড (মাল্টি-ব্রোকার কাঠামো)। ব্রোকার-নির্ভর অংশ শুধু Feed ক্লাসে; পেপার ইঞ্জিন একই থাকে।
+#  এখন শুধু Upstox ডেটা-ফিড আছে। অন্য ব্রোকার = নতুন Feed ক্লাস (spot_today / contracts / option_today) + LIVE_FEEDS-এ নাম।
+# ---------------------------------------------------------------------
+LIVE_KEYS = {"BN": "NSE_INDEX|Nifty Bank", "N50": "NSE_INDEX|Nifty 50", "FIN": "NSE_INDEX|Nifty Fin Service",
+             "SEN": "BSE_INDEX|SENSEX"}
+
+
+def ist_now():
+    n = dt.datetime.utcnow() + dt.timedelta(hours=5, minutes=30)
+    return int((n.date().toordinal() - 719163) * 1440 + n.hour * 60 + n.minute), n.second
+
+
+def _cmin(ts):
+    """Upstox ক্যান্ডেলের সময় ('2026-11-27T09:15:00+05:30') → IST মিনিট (epoch থেকে)"""
+    p = pd.Timestamp(str(ts))
+    if p.tzinfo is not None:
+        p = p.tz_localize(None)
+    return int((p - EPOCH) // pd.Timedelta(minutes=1))
+
+
+def _exp_date(x):
+    if isinstance(x, (int, float)):
+        return (dt.datetime.utcfromtimestamp(x / 1000.0) + dt.timedelta(hours=5, minutes=30)).date()
+    return dt.date.fromisoformat(str(x)[:10])
+
+
+class UpstoxFeed:
+    name = "Upstox"
+    V2 = "https://api.upstox.com/v2"
+    V3 = "https://api.upstox.com/v3"
+
+    def __init__(self, token_file):
+        self.token_file = token_file
+        self.sleep = 0.35
+
+    def get(self, url):
+        import urllib.request, urllib.error
+        if not os.path.exists(self.token_file):
+            raise ValueError("টোকেন ফাইল নেই: %s" % self.token_file)
+        tok = open(self.token_file, encoding="utf-8").read().strip()
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "Authorization": "Bearer " + tok})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                body = json.loads(r.read().decode("utf-8") or "{}")
+                st = r.status
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.loads(e.read().decode("utf-8") or "{}")
+            except Exception:
+                body = {}
+            st = e.code
+        except Exception as e:
+            return 0, {"error": str(e)}
+        time.sleep(self.sleep)
+        return st, body
+
+    def _candles(self, key):
+        from urllib.parse import quote
+        st, body = self.get("%s/historical-candle/intraday/%s/minutes/1" % (self.V3, quote(key, safe="")))
+        if st == 401:
+            raise ValueError("Upstox টোকেন কাজ করছে না (401) — নতুন টোকেন দিন")
+        cs = ((body or {}).get("data") or {}).get("candles") or []
+        rows = []
+        for r in cs:
+            try:
+                rows.append((_cmin(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5] or 0)))
+            except Exception:
+                pass
+        rows.sort()
+        return st, rows
+
+    def spot_today(self, key):
+        return self._candles(key)
+
+    def option_today(self, ikey):
+        return self._candles(ikey)
+
+    def contracts(self, key):
+        from urllib.parse import quote
+        st, body = self.get("%s/option/contract?instrument_key=%s" % (self.V2, quote(key, safe="")))
+        if st == 401:
+            raise ValueError("Upstox টোকেন কাজ করছে না (401) — নতুন টোকেন দিন")
+        d = (body or {}).get("data")
+        return st, (d if isinstance(d, list) else [])
+
+
+LIVE_FEEDS = {"upstox": UpstoxFeed}
+
+
+def make_feed(name):
+    cls = LIVE_FEEDS.get(name)
+    if cls is None:
+        raise ValueError("এই ব্রোকারের ফিড এখনো নেই: %s" % name)
+    src = DATA.get("src") or {}
+    return cls(os.path.join(src.get("db_dir") or os.getcwd(), "upstox_token.txt"))
+
+
+class LiveState:
+    def __init__(self, feed, inst, band, min_dte):
+        self.feed, self.inst, self.band, self.min_dte = feed, inst, band, min_dte
+        self.key = LIVE_KEYS[inst]
+        self.contracts = None       # নির্বাচিত এক্সপায়ারির কন্ট্র্যাক্ট: {(typ, strike): (ikey, lot)}
+        self.expiry = None
+        self.spot = []
+        self.opt = {}               # (typ, strike) -> rows
+        self.fetched = set()
+        self.last_err = ""
+
+    def pick_expiry(self, today):
+        st, cons = self.feed.contracts(self.key)
+        if st != 200 or not cons:
+            raise ValueError("কন্ট্র্যাক্ট তালিকা আসেনি (status %s)" % st)
+        by = {}
+        for c in cons:
+            try:
+                e = _exp_date(c.get("expiry"))
+                stk = float(c.get("strike_price"))
+            except Exception:
+                continue
+            if c.get("instrument_type") in ("CE", "PE") and c.get("instrument_key"):
+                by.setdefault(e, {})[(c["instrument_type"], stk)] = (c["instrument_key"], int(c.get("lot_size") or 0))
+        tgt = dt.date.fromordinal(719163 + today) + dt.timedelta(days=self.min_dte)
+        ex = [e for e in sorted(by) if e >= tgt]
+        if not ex:
+            raise ValueError("আজ বা পরের কোনো এক্সপায়ারি পাওয়া যায়নি")
+        self.expiry = ex[0]
+        self.contracts = by[self.expiry]
+
+    def refresh(self, now):
+        today = now // 1440
+        if self.contracts is None:
+            self.pick_expiry(today)
+        st, rows = self.feed.spot_today(self.key)
+        if st != 200:
+            raise ValueError("স্পট ক্যান্ডেল আসেনি (status %s)" % st)
+        self.spot = [r for r in rows if r[0] // 1440 == today]
+        if not self.spot:
+            return False
+        strikes = sorted({k[1] for k in self.contracts})
+        last = self.spot[-1][4]
+        i = int(np.argmin(np.abs(np.array(strikes) - last)))
+        for j in range(max(0, i - self.band), min(len(strikes), i + self.band + 1)):
+            for typ in ("CE", "PE"):
+                if (typ, strikes[j]) in self.contracts:
+                    self.fetched.add((typ, strikes[j]))
+        for k in sorted(self.fetched):
+            st, r = self.feed.option_today(self.contracts[k][0])
+            if st == 200:
+                self.opt[k] = [x for x in r if x[0] // 1440 == today]
+            else:
+                self.last_err = "অপশন %s %s: status %s" % (k[0], k[1], st)
+        return True
+
+    def build(self, Dh, now):
+        """ইতিহাস (Dh-এর শেষ ৩০ দিন) + আজকের লাইভ বার → ডেটা-অবজেক্ট"""
+        today = now // 1440
+        i0 = int(np.searchsorted(Dh.day, today - 30, "left"))
+        i1 = int(np.searchsorted(Dh.day, today, "left"))
+        a = np.array(self.spot, dtype="float64")
+        t = np.r_[Dh.t[i0:i1], a[:, 0].astype("int64")]
+        V = Data()
+        V._bars, V._cache = {}, {}
+        V.t = t
+        V.o, V.h, V.l, V.c, V.v = (np.r_[getattr(Dh, n)[i0:i1], a[:, k]] for n, k in (("o", 1), ("h", 2), ("l", 3), ("c", 4), ("v", 5)))
+        _spot_finish(V, lambda *x: None, view=True)
+        ex = day_int(self.expiry.isoformat())
+        V.opt, V.strikes, V.exp_lot, V.exp_range = {}, {}, {}, {}
+        lo = hi = None
+        for (typ, stk), rows in self.opt.items():
+            if not rows:
+                continue
+            b = np.array(rows, dtype="float64")
+            V.opt[(ex, typ, float(stk))] = (b[:, 0].astype("int64"), b[:, 1], b[:, 2], b[:, 3], b[:, 4])
+            lo = int(b[0, 0]) if lo is None else min(lo, int(b[0, 0]))
+            hi = int(b[-1, 0]) if hi is None else max(hi, int(b[-1, 0]))
+            if self.contracts[(typ, stk)][1]:
+                V.exp_lot[ex] = self.contracts[(typ, stk)][1]
+        if lo is not None:
+            V.exp_range[ex] = (lo, hi)
+        _opt_finish(V, lambda *x: None)
+        return V
+
+
+def live_selftest(inst, provider="upstox"):
+    """সাবধানী কানেকশন টেস্ট: প্রতিটি ধাপের status ও কয়টা বার এল — সমস্যা হলে এই আউটপুট পাঠান।"""
+    out = []
+
+    def ck(name, ok, detail):
+        out.append({"name": name, "ok": bool(ok), "detail": detail})
+    try:
+        feed = make_feed(provider)
+        has = os.path.exists(feed.token_file) and os.path.getsize(feed.token_file) > 10
+        ck("টোকেন ফাইল", has, feed.token_file + ("" if has else " — নেই/খালি (upstox_token.txt রাখুন ডেটা-ফোল্ডারে)"))
+        if not has:
+            return {"checks": out, "all_ok": False}
+        key = LIVE_KEYS[inst]
+        st, rows = feed.spot_today(key)
+        ck("স্পট আজকের ১-মিনিট ক্যান্ডেল", st == 200 and len(rows) > 0,
+           "status %s, %d বার%s" % (st, len(rows), (", শেষ " + hm_str(rows[-1][0]) + " IST") if rows else " (বাজার বন্ধ/ছুটি হলে ০ স্বাভাবিক)"))
+        st, cons = feed.contracts(key)
+        ck("চলতি অপশন কন্ট্র্যাক্ট তালিকা", st == 200 and len(cons) > 0, "status %s, %d কন্ট্র্যাক্ট" % (st, len(cons)))
+        if cons:
+            ex = sorted({_exp_date(c.get("expiry")) for c in cons if c.get("expiry") is not None})
+            ck("এক্সপায়ারি", bool(ex), ", ".join(str(e) for e in ex[:4]))
+            if rows:
+                last = rows[-1][4]
+                e0 = ex[0]
+                cs = [c for c in cons if _exp_date(c.get("expiry")) == e0 and c.get("instrument_type") == "CE"]
+                if cs:
+                    c = min(cs, key=lambda c: abs(float(c["strike_price"]) - last))
+                    st2, r2 = feed.option_today(c["instrument_key"])
+                    ck("অপশন (ATM CE) ১-মিনিট", st2 == 200 and len(r2) > 0, "%s স্ট্রাইক %s: status %s, %d বার" % (e0, c["strike_price"], st2, len(r2)))
+    except Exception as e:
+        ck("ত্রুটি", False, "%s: %s" % (type(e).__name__, e))
+    return {"checks": out, "all_ok": all(c["ok"] for c in out) and len(out) >= 3}
+
+
+def paper_live(sess):
+    """লাইভ পেপার: প্রতি মিনিটে ফিড টেনে আজকের দিন আবার হিসাব। একটি দিনের সেশন (বাজার বন্ধে শেষ)।"""
+    D = DATA["D"]
+    G = sess["settings"]["general"]
+    inst = sess.get("inst") or (DATA.get("src") or {}).get("inst") or ""
+    if inst not in LIVE_KEYS:
+        raise ValueError("লাইভের জন্য ইনডেক্স অজানা (%s)" % inst)
+    feed = make_feed(sess.get("feed", "upstox"))
+    LS = LiveState(feed, inst, int(sess.get("band", 3)), int(G["min_dte"]))
+    sq = hm(G["sqoff"])
+    sess["msg"] = "লাইভ ফিডের অপেক্ষা…"
+    clock = sess.get("_clock") or ist_now
+    sleeper = sess.get("_sleep") or time.sleep
+    last_now = -1
+    while not PAPER["stop"]:
+        now, sec = clock()
+        mod = now % 1440
+        if mod < OPEN_MIN + 1:
+            sess["msg"] = "বাজার খোলার অপেক্ষা (৯:১৫)…"
+            sleeper(15)
+            continue
+        if now == last_now:
+            sleeper(max(1, 60 - sec + 3))
+            continue
+        t_net = time.time()
+        try:
+            ok = LS.refresh(now)
+        except ValueError as e:
+            sess["msg"] = "ফিড ত্রুটি: %s" % e
+            if "টোকেন" in str(e):
+                raise
+            sleeper(20)
+            continue
+        sess["feed_secs"] = round(time.time() - t_net, 1)
+        if not ok:
+            sess["msg"] = "আজকের স্পট ক্যান্ডেল নেই (ছুটি/বাজার বন্ধ?)"
+            if mod > sq + 5:
+                break
+            sleeper(30)
+            continue
+        Dl = LS.build(D, now)
+        today = paper_tick(sess, Dl, now)
+        sess["msg"] = "চলছে | ফিড %.1fs | স্ট্রাইক %d | %s" % (sess["feed_secs"], len(LS.fetched), LS.last_err)
+        last_now = now
+        if mod >= sq:
+            paper_finalize_day(sess, today)
+            sess["msg"] = "আজকের সেশন শেষ"
+            break
+        sleeper(max(1, 60 - sec + 3))
+
+
+def paper_start(payload):
+    if PAPER["thread"] is not None and PAPER["thread"].is_alive():
+        raise ValueError("একটি পেপার সেশন চলছে — আগে থামান")
+    mode = payload.get("mode", "replay")
+    st = norm_settings(payload["settings"])
+    if st["general"].get("chart") == "prem":
+        raise ValueError("পেপার ট্রেড এখন শুধু স্পট-সিগন্যাল মোডে চলে (প্রিমিয়াম-চার্ট মোডে নয়)")
+    D = DATA["D"]
+    sid = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    sess = {"id": sid, "name": payload.get("name") or ("Paper " + sid), "mode": mode, "inst": (DATA.get("src") or {}).get("inst", ""),
+            "started": dt.datetime.now().isoformat(timespec="seconds"), "status": "running", "msg": "",
+            "settings": st, "capital": st["general"]["capital"], "closed": [], "events": [], "today": [], "open": None,
+            "now": 0, "day": "", "days_done": 0, "n_days": 0,
+            "from": payload.get("from") or day_str(int(D.du[-1])), "to": payload.get("to") or day_str(int(D.du[-1])),
+            "step": int(payload.get("step") or st["general"]["tf"]), "delay": float(payload.get("delay") or 0),
+            "feed": payload.get("feed", "upstox"), "band": int(payload.get("band") or 3)}
+    if payload.get("_test_clock"):
+        sess["_clock"], sess["_sleep"] = payload["_test_clock"], payload["_test_sleep"]
+    PAPER["stop"] = False
+    PAPER["sess"] = sess
+
+    def work():
+        try:
+            if mode == "replay":
+                paper_replay(sess)
+            else:
+                paper_live(sess)
+            sess["status"] = "stopped" if PAPER["stop"] else "done"
+        except Exception as e:
+            traceback.print_exc()
+            sess["status"] = "error"
+            sess["msg"] = "%s: %s" % (type(e).__name__, e)
+        finally:
+            paper_save(sess)
+    th = threading.Thread(target=work, daemon=True)
+    PAPER["thread"] = th
+    th.start()
+    return sid
+
+
+def paper_status():
+    sess = PAPER["sess"]
+    if not sess:
+        return {"sess": None}
+    with PLOCK:
+        out = {k: v for k, v in sess.items() if not k.startswith("_") and k not in ("settings", "closed")}
+        closed = list(sess["closed"])
+        today_closed = [t for t in sess.get("today", []) if not t["open"]]
+    allc = closed + today_closed
+    cap = sess["capital"]
+    out["stats"] = calc_stats(allc, cap)
+    out["trades"] = allc
+    out["equity"] = [round(x, 2) for x in np.cumsum([t["net"] for t in allc]).tolist()] if allc else []
+    out["live_pnl"] = float(sum(t["net"] for t in allc) + (out["open"]["net"] if out.get("open") else 0.0))
+    out["running"] = bool(PAPER["thread"] is not None and PAPER["thread"].is_alive())
+    return {"sess": out}
+
+
+def paper_list():
+    res = []
+    for fn in sorted(glob.glob(os.path.join(paper_dir(), "*.json")))[-30:]:
+        try:
+            with open(fn, encoding="utf-8") as f:
+                s = json.load(f)
+            res.append({"id": s["id"], "name": s.get("name"), "mode": s.get("mode"), "from": s.get("from"), "to": s.get("to"),
+                        "n": len(s.get("closed", [])), "net": float(sum(t["net"] for t in s.get("closed", []))), "status": s.get("status")})
+        except Exception:
+            pass
+    return {"list": res[::-1]}
+
+
 UPD = {"running": False, "log": [], "started": ""}
 
 
@@ -2414,6 +2904,10 @@ class Handler(BaseHTTPRequestHandler):
                                    "presets": {"builtin": builtin_presets(), "user": load_user_presets()}})
             if u.path == "/api/update/status":
                 return self._json({"running": UPD["running"], "log": UPD["log"][-60:], "started": UPD["started"]})
+            if u.path == "/api/paper/status":
+                return self._json(clean(paper_status()))
+            if u.path == "/api/paper/list":
+                return self._json(paper_list())
             if u.path == "/api/job":
                 jid = parse_qs(u.query).get("id", [""])[0]
                 j = JOBS.get(jid)
@@ -2428,6 +2922,30 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            if u.path == "/api/paper/start":
+                return self._json({"id": paper_start(body)})
+            if u.path == "/api/live/test":
+                src = DATA.get("src") or {}
+                return self._json(live_selftest(body.get("inst") or src.get("inst") or "N50", body.get("provider", "upstox")))
+            if u.path == "/api/paper/stop":
+                PAPER["stop"] = True
+                return self._json({"ok": True})
+            if u.path == "/api/paper/reset":
+                if PAPER["thread"] is not None and PAPER["thread"].is_alive():
+                    return self._json({"error": "আগে থামান"}, 400)
+                PAPER["sess"] = None
+                return self._json({"ok": True})
+            if u.path == "/api/paper/load":
+                fn = os.path.join(paper_dir(), os.path.basename(str(body.get("id"))) + ".json")
+                if not os.path.exists(fn):
+                    return self._json({"error": "সেশন ফাইল নেই"}, 404)
+                if PAPER["thread"] is not None and PAPER["thread"].is_alive():
+                    return self._json({"error": "আগে চলমান সেশন থামান"}, 400)
+                with open(fn, encoding="utf-8") as f:
+                    PAPER["sess"] = json.load(f)
+                PAPER["sess"].setdefault("today", [])
+                PAPER["sess"]["open"] = None
+                return self._json({"ok": True})
             if u.path == "/api/start":
                 return self._json({"id": start_job(body["kind"], body)})
             if u.path == "/api/update":
