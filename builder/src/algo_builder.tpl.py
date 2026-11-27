@@ -170,7 +170,7 @@ def load_data(spot_csv, opt_dir, log=print):
 INSTR_NAMES = {"BN": "BankNifty", "N50": "Nifty 50", "FIN": "FinNifty", "SEN": "Sensex"}
 
 
-def load_db(db_dir, inst, d0=None, d1=None, log=print):
+def _load_db_raw(db_dir, inst, d0=None, d1=None, log=print):
     """নতুন SQLite ডেটা (gb.db স্পট + gb_opt.db অপশন) থেকে D বানায়। d0/d1 = 'YYYY-MM-DD' (ঐচ্ছিক)।
     ফাঁকা থাকলে সব ডেটা (সময় ও মেমোরি বেশি লাগে; দরকারে তারিখ সীমা দিন)।"""
     import sqlite3
@@ -243,6 +243,48 @@ def load_db(db_dir, inst, d0=None, d1=None, log=print):
         finally:
             oc.close()
     _opt_finish(D, log)
+    return D
+
+
+def load_db(db_dir, inst, d0=None, d1=None, log=print):
+    """SQLite থেকে লোড; প্রথমবারের পর ডিস্ক-ক্যাশ (pickle) থেকে কয়েক সেকেন্ডে। ডেটাবেস বদলালে (আপডেট) ক্যাশ নিজে বাতিল।"""
+    import pickle, hashlib
+    global BASE_TF
+    try:
+        sig = []
+        for fn in ("gb.db", "gb_opt.db"):
+            pth = os.path.join(db_dir, fn)
+            stt = os.stat(pth) if os.path.exists(pth) else None
+            sig.append("%s:%s:%s" % (fn, stt.st_size if stt else 0, int(stt.st_mtime) if stt else 0))
+        key = hashlib.md5(("|".join(sig) + "|%s|%s|%s|v1" % (inst, d0, d1)).encode()).hexdigest()[:12]
+        cdir = os.path.join(db_dir, "cache")
+        cf = os.path.join(cdir, "D_%s_%s.pkl" % (inst, key))
+    except Exception:
+        return _load_db_raw(db_dir, inst, d0, d1, log)
+    if os.path.exists(cf):
+        try:
+            t0 = time.time()
+            with open(cf, "rb") as f:
+                D = pickle.load(f)
+            BASE_TF = int(D.base)
+            D._bars, D._cache = {}, {}
+            log("ক্যাশ থেকে লোড (%.1f সেকেন্ড): %s, %d দিন, %d কন্ট্র্যাক্ট" % (time.time() - t0, inst, len(D.du), len(D.opt)))
+            return D
+        except Exception as e:
+            log("ক্যাশ পড়া গেল না (%s), নতুন করে লোড হচ্ছে" % e)
+    D = _load_db_raw(db_dir, inst, d0, d1, log)
+    try:
+        os.makedirs(cdir, exist_ok=True)
+        for old in glob.glob(os.path.join(cdir, "D_%s_*.pkl" % inst)):
+            os.remove(old)
+        D._bars, D._cache = {}, {}
+        tmp = cf + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(D, f, protocol=5)
+        os.replace(tmp, cf)
+        log("ক্যাশ সেভ হয়েছে — পরেরবার দ্রুত খুলবে (%.0f MB)" % (os.path.getsize(cf) / 1e6))
+    except Exception as e:
+        log("ক্যাশ সেভ হয়নি: %s" % e)
     return D
 
 
@@ -2502,27 +2544,44 @@ class UpstoxFeed:
     def __init__(self, token_file):
         self.token_file = token_file
         self.sleep = 0.35
+        self.last_body = {}
 
     def get(self, url):
-        import urllib.request, urllib.error
         if not os.path.exists(self.token_file):
             raise ValueError("টোকেন ফাইল নেই: %s" % self.token_file)
         tok = open(self.token_file, encoding="utf-8").read().strip()
-        req = urllib.request.Request(url, headers={"Accept": "application/json", "Authorization": "Bearer " + tok})
+        hdr = {"Accept": "application/json", "Authorization": "Bearer " + tok,
+               "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"}
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
-                body = json.loads(r.read().decode("utf-8") or "{}")
-                st = r.status
-        except urllib.error.HTTPError as e:
             try:
-                body = json.loads(e.read().decode("utf-8") or "{}")
-            except Exception:
-                body = {}
-            st = e.code
+                import requests          # backend-এর মতোই (WAF অনেক সময় urllib-এর UA আটকায়)
+                r = requests.get(url, headers=dict(hdr, **{"User-Agent": "python-requests/2.32"}), timeout=30)
+                st, txt = r.status_code, r.text
+            except ImportError:
+                import urllib.request, urllib.error
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(url, headers=hdr), timeout=30) as r:
+                        st, txt = r.status, r.read().decode("utf-8")
+                except urllib.error.HTTPError as e:
+                    st, txt = e.code, e.read().decode("utf-8", "replace")
         except Exception as e:
             return 0, {"error": str(e)}
+        try:
+            body = json.loads(txt or "{}")
+        except Exception:
+            body = {"raw": (txt or "")[:200]}
+        self.last_body = body
         time.sleep(self.sleep)
         return st, body
+
+    @staticmethod
+    def why(body):
+        """ব্যর্থ উত্তর থেকে ছোট কারণ-বাক্য (বিশ্লেষণের জন্য)"""
+        try:
+            e = (body.get("errors") or [{}])[0]
+            return (e.get("message") or e.get("errorCode") or body.get("message") or body.get("error") or body.get("raw") or "")[:140]
+        except Exception:
+            return ""
 
     def _candles(self, key):
         from urllib.parse import quote
@@ -2579,7 +2638,7 @@ class LiveState:
     def pick_expiry(self, today):
         st, cons = self.feed.contracts(self.key)
         if st != 200 or not cons:
-            raise ValueError("কন্ট্র্যাক্ট তালিকা আসেনি (status %s)" % st)
+            raise ValueError("কন্ট্র্যাক্ট তালিকা আসেনি (status %s %s)" % (st, UpstoxFeed.why(getattr(self.feed, "last_body", {}))))
         by = {}
         for c in cons:
             try:
@@ -2602,7 +2661,7 @@ class LiveState:
             self.pick_expiry(today)
         st, rows = self.feed.spot_today(self.key)
         if st != 200:
-            raise ValueError("স্পট ক্যান্ডেল আসেনি (status %s)" % st)
+            raise ValueError("স্পট ক্যান্ডেল আসেনি (status %s %s)" % (st, UpstoxFeed.why(getattr(self.feed, "last_body", {}))))
         self.spot = [r for r in rows if r[0] // 1440 == today]
         if not self.spot:
             return False
@@ -2666,9 +2725,9 @@ def live_selftest(inst, provider="upstox"):
         key = LIVE_KEYS[inst]
         st, rows = feed.spot_today(key)
         ck("স্পট আজকের ১-মিনিট ক্যান্ডেল", st == 200 and len(rows) > 0,
-           "status %s, %d বার%s" % (st, len(rows), (", শেষ " + hm_str(rows[-1][0]) + " IST") if rows else " (বাজার বন্ধ/ছুটি হলে ০ স্বাভাবিক)"))
+           "status %s, %d বার%s" % (st, len(rows), (", শেষ " + hm_str(rows[-1][0]) + " IST") if rows else ((" — " + UpstoxFeed.why(feed.last_body)) if st != 200 else " (বাজার বন্ধ/ছুটি হলে ০ স্বাভাবিক)")))
         st, cons = feed.contracts(key)
-        ck("চলতি অপশন কন্ট্র্যাক্ট তালিকা", st == 200 and len(cons) > 0, "status %s, %d কন্ট্র্যাক্ট" % (st, len(cons)))
+        ck("চলতি অপশন কন্ট্র্যাক্ট তালিকা", st == 200 and len(cons) > 0, "status %s, %d কন্ট্র্যাক্ট%s" % (st, len(cons), (" — " + UpstoxFeed.why(feed.last_body)) if st != 200 else ""))
         if cons:
             ex = sorted({_exp_date(c.get("expiry")) for c in cons if c.get("expiry") is not None})
             ck("এক্সপায়ারি", bool(ex), ", ".join(str(e) for e in ex[:4]))
