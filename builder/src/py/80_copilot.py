@@ -5,10 +5,14 @@
 LLM_MODEL = "claude-sonnet-5-5"
 
 
+LLM_OPTS = {"model": None, "json": False}
+GEMINI_DEFAULT = "gemini-3.5-flash-lite"
+
+
 def llm_key(given=None):
     if given:
         return str(given).strip()
-    for pth in (os.environ.get("ANTHROPIC_API_KEY"), None):
+    for pth in (os.environ.get("GEMINI_API_KEY"), os.environ.get("ANTHROPIC_API_KEY")):
         if pth:
             return pth.strip()
     try:
@@ -20,13 +24,41 @@ def llm_key(given=None):
     return ""
 
 
+def llm_provider(key):
+    k = (key or "").strip()
+    if k.startswith("AIza"):
+        return "gemini"
+    if k.startswith("sk-ant-"):
+        return "anthropic"
+    raise ValueError("API Key চেনা যায়নি — Gemini Key 'AIza' দিয়ে, Anthropic Key 'sk-ant-' দিয়ে শুরু হয়")
+
+
 def llm_call(system, user, key, max_tokens=1600):
     import requests
+    prov = llm_provider(key)
+    model = (LLM_OPTS.get("model") or "").strip()
+    if prov == "gemini":
+        model = model or GEMINI_DEFAULT
+        gc = {"maxOutputTokens": max_tokens}
+        if LLM_OPTS.get("json"):
+            gc["responseMimeType"] = "application/json"
+        r = requests.post("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model,
+                          headers={"x-goog-api-key": key, "content-type": "application/json"},
+                          json={"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": user}]}],
+                                "generationConfig": gc}, timeout=60)
+        if r.status_code != 200:
+            raise ValueError("Gemini ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+        j = r.json()
+        parts = (((j.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+        txt = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not txt:
+            raise ValueError("Gemini খালি উত্তর দিয়েছে")
+        return txt
     r = requests.post("https://api.anthropic.com/v1/messages",
                       headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                      json={"model": LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
+                      json={"model": model or LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
     if r.status_code != 200:
-        raise ValueError("LLM ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+        raise ValueError("Anthropic ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
     j = r.json()
     return "".join(b.get("text", "") for b in j.get("content", []))
 
@@ -55,7 +87,11 @@ def copilot_idea(text, key, caller=None):
               "\"entry\":[{\"l\":src,\"op\":op,\"r\":src|\"number\",\"num\":float,\"join\":\"AND\"|\"OR\"}], \"exit\":[same],"
               "\"sl\":{\"mode\":\"pct\"|\"pts\"|\"none\",\"val\":float},\"tp\":{...},\"trail\":{\"mode\":\"none\"|\"pct\",\"val\":float,\"act\":float},\"time_stop\":int}\n"
               "অনুমোদিত src: %s\nঅনুমোদিত op: %s\nঅজানা কিছু বানাবে না; আইডিয়া বোঝা না গেলে {\"error\":\"কারণ\"} দাও। কোনো গাণিতিক ফলাফল দাবি করবে না।" % (src, ops))
-    out = _extract_json(caller(system, text, key))
+    LLM_OPTS["json"] = True
+    try:
+        out = _extract_json(caller(system, text, key))
+    finally:
+        LLM_OPTS["json"] = False
     if out.get("error"):
         raise ValueError("আইডিয়া বোঝা যায়নি: %s" % out["error"])
     c = default_case(1)

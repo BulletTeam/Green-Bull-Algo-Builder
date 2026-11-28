@@ -361,7 +361,8 @@ class LiveState:
                 if (typ, strikes[j]) in self.contracts:
                     self.fetched.add((typ, strikes[j]))
         from concurrent.futures import ThreadPoolExecutor
-        far = {k for k in self.fetched if abs(strikes.index(k[1]) - i) > self.band + 6} if self.fetched else set()
+        keep = set(getattr(self, 'hold_keys', ()) or ())     # খোলা ট্রেডের কন্ট্র্যাক্ট কখনো বাদ নয়
+        far = {k for k in self.fetched if k not in keep and abs(strikes.index(k[1]) - i) > self.band + 2} if self.fetched else set()
         self.fetched -= far          # দাম অনেক সরে গেলে পুরনো দূরের স্ট্রাইক আর পোল নয়
         ks = sorted(self.fetched)
 
@@ -473,6 +474,15 @@ def paper_live(sess):
             continue
         t_net = time.time()
         try:
+            _o = sess.get('open')
+            if _o:
+                try:
+                    _p = _o['side'].split()
+                    LS.hold_keys = {(_p[1], float(_p[2]))}
+                except Exception:
+                    LS.hold_keys = set()
+            else:
+                LS.hold_keys = set()
             ok = LS.refresh(now)
             fails = 0
         except ValueError as e:
@@ -687,7 +697,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "case": default_case(1), "slot": slot(), "info": data_info(),
                                    "sell": {"templates": sell_templates(), "defaults": sell_defaults()},
                                    "datasets": (datasets_info(DATA["src"]["db_dir"]) if (DATA.get("src") or {}).get("mode") == "db" else None),
-                                   "presets": {"builtin": builtin_presets(), "user": load_user_presets()}})
+                                   "presets": {"builtin": builtin_presets(), "user": {}}, "vault": vault_api("list", {}), "vault_dir": VAULT.root()})
             if u.path == "/api/update/status":
                 return self._json({"running": UPD["running"], "log": UPD["log"][-60:], "started": UPD["started"]})
             if u.path == "/api/paper/status":
@@ -712,6 +722,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"id": paper_start(body)})
             if u.path == "/api/copilot":
                 key = llm_key(body.get("key"))
+                LLM_OPTS["model"] = (body.get("model") or "").strip() or None
                 if not key:
                     return self._json({"error": "API Key দেওয়া নেই (এটি ঐচ্ছিক ফিচার; অফলাইন অ্যাডভাইজার Key ছাড়াই চলে)"})
                 try:
@@ -778,6 +789,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/chart":
                 with RUN_LOCK:
                     return self._json(chart_data(DATA["D"], body["settings"], body))
+            if u.path.startswith("/api/vault/"):
+                return self._json(vault_api(u.path[len("/api/vault/"):], body))
             if u.path == "/api/preset/save":
                 p = load_user_presets()
                 p[body["name"]] = body["settings"]

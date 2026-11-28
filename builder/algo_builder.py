@@ -17,6 +17,7 @@ ALGO BUILDER - অপশন প্রিমিয়াম ব্যাকটে
 import os
 import sys
 import json
+import uuid
 import time
 import math
 import copy
@@ -1473,6 +1474,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 sp_i = max(int(np.searchsorted(D.t, te)) - 1, 0)
                 spot_px = float(D.c[sp_i])
                 stk = sk
+                ii = max(int(np.searchsorted(B.e, te, side="right")) - 1, 0)
             else:
                 best = None
                 for k in range(len(cases)):
@@ -1511,7 +1513,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 "reason": r["reason"], "lots": int(r["qty"] // max(lot, 1)), "qty": r["qty"],
                 "gross": round(r["gross"], 2), "costs": round(r["costs"], 2), "net": round(r["net"], 2),
                 "ret": round(r["ret"], 2), "spot": round(spot_px, 2), "bars": r["bars"],
-                "hold": int(r["exit_t"] - te), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
+                "hold": max(int(D.base), int(r["exit_t"] - te)), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
                 "rret": round(r["rret"], 2),
                 "r": round(r["net"] / r["risk"], 2) if r["risk"] else None,
                 "dte": int(ex - d), "dow": DOWN[(d + 3) % 7], "legs": r["legs"],
@@ -1721,7 +1723,9 @@ def advanced_stats(trades, cap, days_list, Sx=None, D=None):
     # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
     hmap = {}
     for t in trades:
-        k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
+        _m = int(t["in"][:2]) * 60 + int(t["in"][3:5])
+        _b = (_m - OPEN_MIN) // 30 * 30 + OPEN_MIN
+        k = (t["dow"], hm_str(_b))
         hmap[k] = hmap.get(k, 0.0) + t["net"]
     out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hmap.items()]
     mh = {}
@@ -2433,10 +2437,14 @@ def sell_preview(D, raw, date_str=None):
 LLM_MODEL = "claude-sonnet-5-5"
 
 
+LLM_OPTS = {"model": None, "json": False}
+GEMINI_DEFAULT = "gemini-3.5-flash-lite"
+
+
 def llm_key(given=None):
     if given:
         return str(given).strip()
-    for pth in (os.environ.get("ANTHROPIC_API_KEY"), None):
+    for pth in (os.environ.get("GEMINI_API_KEY"), os.environ.get("ANTHROPIC_API_KEY")):
         if pth:
             return pth.strip()
     try:
@@ -2448,13 +2456,41 @@ def llm_key(given=None):
     return ""
 
 
+def llm_provider(key):
+    k = (key or "").strip()
+    if k.startswith("AIza"):
+        return "gemini"
+    if k.startswith("sk-ant-"):
+        return "anthropic"
+    raise ValueError("API Key চেনা যায়নি — Gemini Key 'AIza' দিয়ে, Anthropic Key 'sk-ant-' দিয়ে শুরু হয়")
+
+
 def llm_call(system, user, key, max_tokens=1600):
     import requests
+    prov = llm_provider(key)
+    model = (LLM_OPTS.get("model") or "").strip()
+    if prov == "gemini":
+        model = model or GEMINI_DEFAULT
+        gc = {"maxOutputTokens": max_tokens}
+        if LLM_OPTS.get("json"):
+            gc["responseMimeType"] = "application/json"
+        r = requests.post("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model,
+                          headers={"x-goog-api-key": key, "content-type": "application/json"},
+                          json={"systemInstruction": {"parts": [{"text": system}]}, "contents": [{"role": "user", "parts": [{"text": user}]}],
+                                "generationConfig": gc}, timeout=60)
+        if r.status_code != 200:
+            raise ValueError("Gemini ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+        j = r.json()
+        parts = (((j.get("candidates") or [{}])[0].get("content") or {}).get("parts")) or []
+        txt = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        if not txt:
+            raise ValueError("Gemini খালি উত্তর দিয়েছে")
+        return txt
     r = requests.post("https://api.anthropic.com/v1/messages",
                       headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                      json={"model": LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
+                      json={"model": model or LLM_MODEL, "max_tokens": max_tokens, "system": system, "messages": [{"role": "user", "content": user}]}, timeout=60)
     if r.status_code != 200:
-        raise ValueError("LLM ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
+        raise ValueError("Anthropic ত্রুটি %d: %s" % (r.status_code, r.text[:160]))
     j = r.json()
     return "".join(b.get("text", "") for b in j.get("content", []))
 
@@ -2483,7 +2519,11 @@ def copilot_idea(text, key, caller=None):
               "\"entry\":[{\"l\":src,\"op\":op,\"r\":src|\"number\",\"num\":float,\"join\":\"AND\"|\"OR\"}], \"exit\":[same],"
               "\"sl\":{\"mode\":\"pct\"|\"pts\"|\"none\",\"val\":float},\"tp\":{...},\"trail\":{\"mode\":\"none\"|\"pct\",\"val\":float,\"act\":float},\"time_stop\":int}\n"
               "অনুমোদিত src: %s\nঅনুমোদিত op: %s\nঅজানা কিছু বানাবে না; আইডিয়া বোঝা না গেলে {\"error\":\"কারণ\"} দাও। কোনো গাণিতিক ফলাফল দাবি করবে না।" % (src, ops))
-    out = _extract_json(caller(system, text, key))
+    LLM_OPTS["json"] = True
+    try:
+        out = _extract_json(caller(system, text, key))
+    finally:
+        LLM_OPTS["json"] = False
     if out.get("error"):
         raise ValueError("আইডিয়া বোঝা যায়নি: %s" % out["error"])
     c = default_case(1)
@@ -2532,6 +2572,8 @@ def portfolio_run(D, payload, progress=None):
     runs = []
     for k, it in enumerate(items):
         w = float(it.get("weight") or 1.0)
+        if it.get("id") and not it.get("settings"):
+            it = dict(it, settings=VAULT.get(it["id"])["settings"])
         raw = copy.deepcopy(it["settings"])
         if d_from:
             raw.setdefault("general", {})["from"] = d_from
@@ -4066,6 +4108,325 @@ def run_multi(payload, prog):
 
 
 # =====================================================================
+#  StrategyVault — আপডেট-নিরাপদ স্থায়ী স্ট্র্যাটেজি-ভল্ট (কোড-ফোল্ডারের বাইরে)
+#  অবস্থান: $GB_VAULT_DIR → <db_dir>/vault → ~/.greenbull_vault
+#  গঠন: folders.json, strategies/st_<uuid>.json, trash/st_<uuid>.json
+# =====================================================================
+VAULT_SCHEMA = 2
+GENERAL_FOLDER = "সাধারণ"
+LEGACY_FOLDER = "পুরনো প্রিসেট"
+DEFAULT_FOLDERS = [GENERAL_FOLDER, "Option Buying", "Option Selling", "Live Ready"]
+
+
+def _atomic_write(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, path)
+
+
+class StrategyVault:
+    def __init__(self, root=None):
+        self.lock = threading.RLock()
+        self._root = root
+
+    # ---- অবস্থান ----
+    def root(self):
+        if self._root:
+            r = self._root
+        elif os.environ.get("GB_VAULT_DIR"):
+            r = os.environ["GB_VAULT_DIR"]
+        else:
+            d = (DATA.get("src") or {}).get("db_dir")
+            r = os.path.join(d, "vault") if d else os.path.join(os.path.expanduser("~"), ".greenbull_vault")
+        try:
+            os.makedirs(os.path.join(r, "strategies"), exist_ok=True)
+            os.makedirs(os.path.join(r, "trash"), exist_ok=True)
+        except Exception:
+            r = os.path.join(os.path.expanduser("~"), ".greenbull_vault")
+            os.makedirs(os.path.join(r, "strategies"), exist_ok=True)
+            os.makedirs(os.path.join(r, "trash"), exist_ok=True)
+        return r
+
+    def _p(self, *a):
+        return os.path.join(self.root(), *a)
+
+    # ---- ফোল্ডার ----
+    def _folders_raw(self):
+        fp = self._p("folders.json")
+        seeded = False
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            fl = [str(x) for x in d.get("folders", [])]
+            seeded = True
+        except Exception:
+            fl = []
+        if not seeded:                     # ডিফল্ট ফোল্ডার শুধু প্রথমবার বসে (পরে নাম বদলালে/মুছলে ফিরে আসে না)
+            for n in DEFAULT_FOLDERS:
+                if n not in fl:
+                    fl.append(n)
+        if GENERAL_FOLDER in fl:
+            fl.remove(GENERAL_FOLDER)
+        fl.insert(0, GENERAL_FOLDER)
+        return fl
+
+    def _save_folders(self, fl):
+        _atomic_write(self._p("folders.json"), {"schema_ver": VAULT_SCHEMA, "folders": fl})
+
+    def folders(self):
+        with self.lock:
+            self._legacy_import()
+            return self._folders_raw()
+
+    def folder_create(self, name):
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("ফোল্ডারের নাম দিন")
+        with self.lock:
+            fl = self._folders_raw()
+            if name in fl:
+                raise ValueError("এই নামে ফোল্ডার আছে")
+            fl.append(name)
+            self._save_folders(fl)
+        return fl
+
+    def folder_rename(self, old, new):
+        new = str(new or "").strip()
+        with self.lock:
+            fl = self._folders_raw()
+            if old == GENERAL_FOLDER:
+                raise ValueError("'সাধারণ' ফোল্ডারের নাম বদলানো যায় না")
+            if old not in fl or not new or (new in fl and new != old):
+                raise ValueError("নাম বদলানো গেল না")
+            fl[fl.index(old)] = new
+            self._save_folders(fl)
+            for sub in ("strategies", "trash"):
+                for fn in os.listdir(self._p(sub)):
+                    if fn.endswith(".json"):
+                        rec = self._read(os.path.join(self._p(sub), fn))
+                        if rec and rec.get("folder") == old:
+                            rec["folder"] = new
+                            _atomic_write(os.path.join(self._p(sub), fn), rec)
+        return fl
+
+    def folder_delete(self, name):
+        with self.lock:
+            fl = self._folders_raw()
+            if name == GENERAL_FOLDER:
+                raise ValueError("'সাধারণ' ফোল্ডার মোছা যায় না")
+            if name not in fl:
+                raise ValueError("ফোল্ডার নেই")
+            moved = 0
+            for sub in ("strategies", "trash"):
+                for fn in os.listdir(self._p(sub)):
+                    if fn.endswith(".json"):
+                        rec = self._read(os.path.join(self._p(sub), fn))
+                        if rec and rec.get("folder") == name:
+                            rec["folder"] = GENERAL_FOLDER          # কখনো স্ট্র্যাটেজি মোছা হয় না
+                            _atomic_write(os.path.join(self._p(sub), fn), rec)
+                            moved += 1
+            fl.remove(name)
+            self._save_folders(fl)
+        return {"folders": fl, "moved": moved}
+
+    # ---- স্ট্র্যাটেজি ----
+    def _read(self, fp):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                rec = json.load(f)
+        except Exception:
+            return None
+        return self._migrate(rec)
+
+    def _migrate(self, rec):
+        if not isinstance(rec, dict) or "settings" not in rec:
+            return None
+        if int(rec.get("schema_ver", 1)) < VAULT_SCHEMA:
+            try:
+                rec["settings"] = norm_settings(rec["settings"]) if rec["settings"].get("cases") else rec["settings"]
+            except Exception:
+                pass
+            rec["schema_ver"] = VAULT_SCHEMA
+        rec.setdefault("folder", GENERAL_FOLDER)
+        rec.setdefault("pinned", False)
+        rec.setdefault("note", "")
+        return rec
+
+    def _path(self, sid, trash=False):
+        sid = os.path.basename(str(sid))
+        if not sid.startswith("st_"):
+            sid = "st_" + sid
+        return os.path.join(self._p("trash" if trash else "strategies"), sid + ".json")
+
+    def _new_rec(self, name, settings, folder, summary, note):
+        now = dt.datetime.now().isoformat(timespec="seconds")
+        fl = self._folders_raw()
+        return {"schema_ver": VAULT_SCHEMA, "id": uuid.uuid4().hex[:12], "name": str(name).strip(), "folder": folder if folder in fl else GENERAL_FOLDER,
+                "pinned": False, "note": str(note or ""), "created": now, "updated": now, "settings": settings, "summary": summary or None}
+
+    def save_new(self, name, settings, folder=None, summary=None, note=""):
+        if not str(name or "").strip():
+            raise ValueError("স্ট্র্যাটেজির নাম দিন")
+        with self.lock:
+            self._legacy_import()
+            rec = self._new_rec(name, settings, folder or GENERAL_FOLDER, summary, note)
+            _atomic_write(self._path(rec["id"]), rec)
+        return rec["id"]
+
+    def get(self, sid, trash=False):
+        with self.lock:
+            rec = self._read(self._path(sid, trash))
+        if not rec:
+            raise ValueError("স্ট্র্যাটেজি পাওয়া যায়নি")
+        return rec
+
+    def update(self, sid, settings=None, summary=None, name=None, note=None):
+        with self.lock:
+            rec = self.get(sid)
+            if settings is not None:
+                rec["settings"] = settings
+            if summary is not None:
+                rec["summary"] = summary
+            if name:
+                rec["name"] = str(name).strip()
+            if note is not None:
+                rec["note"] = str(note)
+            rec["updated"] = dt.datetime.now().isoformat(timespec="seconds")
+            _atomic_write(self._path(sid), rec)
+        return rec["id"]
+
+    def duplicate(self, sid):
+        with self.lock:
+            rec = self.get(sid)
+            new = self._new_rec(rec["name"] + " (কপি)", copy.deepcopy(rec["settings"]), rec["folder"], copy.deepcopy(rec.get("summary")), rec.get("note"))
+            _atomic_write(self._path(new["id"]), new)
+        return new["id"]
+
+    def move(self, sid, folder):
+        with self.lock:
+            if folder not in self._folders_raw():
+                raise ValueError("ফোল্ডার নেই")
+            rec = self.get(sid)
+            rec["folder"] = folder
+            _atomic_write(self._path(sid), rec)
+
+    def pin(self, sid, on):
+        with self.lock:
+            rec = self.get(sid)
+            rec["pinned"] = bool(on)
+            _atomic_write(self._path(sid), rec)
+
+    def delete(self, sid):
+        """সফট ডিলিট: trash/-এ সরানো"""
+        with self.lock:
+            rec = self.get(sid)
+            rec["deleted"] = dt.datetime.now().isoformat(timespec="seconds")
+            _atomic_write(self._path(sid, True), rec)
+            os.remove(self._path(sid))
+
+    def restore(self, sid):
+        with self.lock:
+            rec = self.get(sid, True)
+            rec.pop("deleted", None)
+            if rec.get("folder") not in self._folders_raw():
+                rec["folder"] = GENERAL_FOLDER
+            _atomic_write(self._path(sid), rec)
+            os.remove(self._path(sid, True))
+
+    def purge(self, sid):
+        """স্থায়ী মোছা — শুধু ট্র্যাশ থেকে"""
+        with self.lock:
+            fp = self._path(sid, True)
+            if not os.path.exists(fp):
+                raise ValueError("শুধু ট্র্যাশের স্ট্র্যাটেজি স্থায়ীভাবে মোছা যায়")
+            os.remove(fp)
+
+    def list(self, trash=False, with_settings=False):
+        out = []
+        with self.lock:
+            self._legacy_import()
+            d = self._p("trash" if trash else "strategies")
+            for fn in sorted(os.listdir(d)):
+                if not fn.endswith(".json"):
+                    continue
+                rec = self._read(os.path.join(d, fn))
+                if rec:
+                    if not with_settings:
+                        rec = {k: v for k, v in rec.items() if k != "settings"}
+                        rec["legs"] = None
+                    out.append(rec)
+        return out
+
+    # ---- পুরনো presets.json আমদানি (একবার, মূল ফাইল না মুছে) ----
+    def _legacy_import(self):
+        mk = self._p(".presets_migrated")
+        if os.path.exists(mk) or getattr(self, "_importing", False):
+            return
+        self._importing = True
+        try:
+            legacy = load_user_presets()
+            n = 0
+            if legacy:
+                fl = self._folders_raw()
+                if LEGACY_FOLDER not in fl:
+                    fl.append(LEGACY_FOLDER)
+                    self._save_folders(fl)
+                for name, st in legacy.items():
+                    meta = (st or {}).get("_meta") or {}
+                    rec = self._new_rec(name, st, LEGACY_FOLDER, meta.get("stats"), meta.get("note", ""))
+                    _atomic_write(self._path(rec["id"]), rec)
+                    n += 1
+            _atomic_write(mk, {"migrated": n, "at": dt.datetime.now().isoformat(timespec="seconds")})
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self._importing = False
+
+
+VAULT = StrategyVault()
+
+
+def vault_api(op, b):
+    V = VAULT
+    if op == "list":
+        return {"folders": V.folders(), "items": V.list(), "trash": len(V.list(trash=True)), "dir": V.root()}
+    if op == "trash_list":
+        return {"items": V.list(trash=True)}
+    if op == "get":
+        return V.get(b["id"], bool(b.get("trash")))
+    if op == "save":
+        sid = V.save_new(b.get("name"), b["settings"], b.get("folder"), b.get("summary"), b.get("note", ""))
+        return {"id": sid, **vault_api("list", {})}
+    if op == "update":
+        V.update(b["id"], b.get("settings"), b.get("summary"), b.get("name"), b.get("note"))
+    elif op == "duplicate":
+        return {"id": V.duplicate(b["id"]), **vault_api("list", {})}
+    elif op == "move":
+        V.move(b["id"], b.get("folder"))
+    elif op == "pin":
+        V.pin(b["id"], b.get("on", True))
+    elif op == "delete":
+        V.delete(b["id"])
+    elif op == "restore":
+        V.restore(b["id"])
+    elif op == "purge":
+        V.purge(b["id"])
+    elif op == "folder_create":
+        V.folder_create(b.get("name"))
+    elif op == "folder_rename":
+        V.folder_rename(b.get("old"), b.get("new"))
+    elif op == "folder_delete":
+        V.folder_delete(b.get("name"))
+    else:
+        raise ValueError("অজানা ভল্ট-অপারেশন")
+    return vault_api("list", {})
+# =====================================================================
 #  পেপার ট্রেডিং (রিপ্লে + লাইভ)
 #  নীতি: কোনো আলাদা "লাইভ লজিক" নেই। প্রতি টিকে ব্যাকটেস্ট ইঞ্জিনকেই আজকের দিনের জন্য, "এখন পর্যন্ত জানা ডেটা"
 #  দিয়ে চালানো হয় (স্পট শুধু সম্পূর্ণ হওয়া চার্ট বার; চলতি মিনিটের শুধু open)। তাই পেপারের ফল ও ব্যাকটেস্ট
@@ -4428,7 +4789,8 @@ class LiveState:
                 if (typ, strikes[j]) in self.contracts:
                     self.fetched.add((typ, strikes[j]))
         from concurrent.futures import ThreadPoolExecutor
-        far = {k for k in self.fetched if abs(strikes.index(k[1]) - i) > self.band + 6} if self.fetched else set()
+        keep = set(getattr(self, 'hold_keys', ()) or ())     # খোলা ট্রেডের কন্ট্র্যাক্ট কখনো বাদ নয়
+        far = {k for k in self.fetched if k not in keep and abs(strikes.index(k[1]) - i) > self.band + 2} if self.fetched else set()
         self.fetched -= far          # দাম অনেক সরে গেলে পুরনো দূরের স্ট্রাইক আর পোল নয়
         ks = sorted(self.fetched)
 
@@ -4540,6 +4902,15 @@ def paper_live(sess):
             continue
         t_net = time.time()
         try:
+            _o = sess.get('open')
+            if _o:
+                try:
+                    _p = _o['side'].split()
+                    LS.hold_keys = {(_p[1], float(_p[2]))}
+                except Exception:
+                    LS.hold_keys = set()
+            else:
+                LS.hold_keys = set()
             ok = LS.refresh(now)
             fails = 0
         except ValueError as e:
@@ -4754,7 +5125,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "case": default_case(1), "slot": slot(), "info": data_info(),
                                    "sell": {"templates": sell_templates(), "defaults": sell_defaults()},
                                    "datasets": (datasets_info(DATA["src"]["db_dir"]) if (DATA.get("src") or {}).get("mode") == "db" else None),
-                                   "presets": {"builtin": builtin_presets(), "user": load_user_presets()}})
+                                   "presets": {"builtin": builtin_presets(), "user": {}}, "vault": vault_api("list", {}), "vault_dir": VAULT.root()})
             if u.path == "/api/update/status":
                 return self._json({"running": UPD["running"], "log": UPD["log"][-60:], "started": UPD["started"]})
             if u.path == "/api/paper/status":
@@ -4779,6 +5150,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"id": paper_start(body)})
             if u.path == "/api/copilot":
                 key = llm_key(body.get("key"))
+                LLM_OPTS["model"] = (body.get("model") or "").strip() or None
                 if not key:
                     return self._json({"error": "API Key দেওয়া নেই (এটি ঐচ্ছিক ফিচার; অফলাইন অ্যাডভাইজার Key ছাড়াই চলে)"})
                 try:
@@ -4845,6 +5217,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/chart":
                 with RUN_LOCK:
                     return self._json(chart_data(DATA["D"], body["settings"], body))
+            if u.path.startswith("/api/vault/"):
+                return self._json(vault_api(u.path[len("/api/vault/"):], body))
             if u.path == "/api/preset/save":
                 p = load_user_presets()
                 p[body["name"]] = body["settings"]
@@ -4943,7 +5317,7 @@ section[hidden]{display:none}
 .f{display:flex;flex-direction:column;gap:3px;min-width:92px;flex:1 1 92px}
 .f>span{font-size:11px;color:var(--mut);letter-spacing:.2px}
 .f.chk{flex-direction:row;align-items:center;gap:8px;flex:1 1 100%}
-select,input[type=text],input[type=number],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
+select,input[type=text],input[type=number],input[type=password],input[type=date],input[type=time],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
 select:focus,input:focus,textarea:focus{outline:0;border-color:var(--ac);box-shadow:0 0 0 3px #22d36b22}
 input[type=checkbox]{width:19px;height:19px;accent-color:var(--ac)}
 .ind{width:100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
@@ -5335,18 +5709,27 @@ async function loadDS(inst, from, to, status) {
 }
 let BUSY = false;
 let LASTRUN = null;
-async function saveStrategy(name, note) {
+let VLT = {folder: 'all', q: '', sort: 'upd', active: null, trash: false, trashItems: []};
+try { VLT.active = localStorage.getItem('gb_active_id') || null; } catch (e) {}
+function setActive(id) { VLT.active = id; try { if (id) localStorage.setItem('gb_active_id', id); else localStorage.removeItem('gb_active_id'); } catch (e) {} }
+function vsummary() {
+  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; return {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), from: LAST.meta.from, to: LAST.meta.to}; }
+  return null;
+}
+async function saveStrategy(name, note, folder) {
   name = (name || '').trim();
   if (!name) { alert('স্ট্র্যাটেজির নাম দিন'); return false; }
-  if (META.presets.user[name] && !confirm('"' + name + '" নামে আগেই সেভ আছে। বদলে নতুনটা সেভ করবেন?')) return false;
-  const snap = JSON.parse(JSON.stringify(S));
-  const m = {saved: new Date().toISOString().slice(0, 16).replace('T', ' '), note: (note || '').trim()};
-  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; m.stats = {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), rr: +a.rr.toFixed(2), from: LAST.meta.from, to: LAST.meta.to}; }
-  snap._meta = m;
-  const r = await api('/api/preset/save', {name, settings: snap});
-  META.presets.user = r.user; renderPresets();
-  $('#status').textContent = '✓ সেভ হয়েছে: ' + name;
+  const r = await api('/api/vault/save', {name, note: (note || '').trim(), settings: JSON.parse(JSON.stringify(S)), summary: vsummary(), folder: folder || (VLT.folder !== 'all' && VLT.folder !== '__trash' ? VLT.folder : null)});
+  if (r.error) { alert(r.error); return false; }
+  META.vault = r; setActive(r.id); renderPresets();
+  $('#status').textContent = '✓ ভল্টে সেভ হয়েছে: ' + name;
   return true;
+}
+async function updateActive() {
+  if (!VLT.active) return false;
+  const r = await api('/api/vault/update', {id: VLT.active, settings: JSON.parse(JSON.stringify(S)), summary: vsummary()});
+  if (r.error) { alert(r.error); return false; }
+  META.vault = r; renderPresets(); $('#status').textContent = '✓ আপডেট হয়েছে (একই স্ট্র্যাটেজি)'; return true;
 }
 async function runJob(payload, label) {
   if (BUSY) return null;
@@ -6017,14 +6400,15 @@ function renderSweep() {
 /* ---------- 📊 পোর্টফোলিও: একাধিক স্ট্র্যাটেজি একসাথে + কোরিলেশন ---------- */
 let PORT = {sel: {}, w: {}, res: null, sellOn: false};
 function renderPortfolio(root) {
-  const names = Object.keys(META.presets.user || {});
-  const box = h('div', {class: 'card'}), b = h('div', {class: 'body'});
+  const vitems = ((META.vault || {}).items || []);
+  const box = h('details', {class: 'card'}), b = h('div', {class: 'body'});
   box.append(h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, '📊 পোর্টফোলিও ব্যাকটেস্ট (একাধিক স্ট্র্যাটেজি একসাথে)'));
-  if (names.length < 1) b.append(h('div', {class: 'note'}, 'আগে কমপক্ষে ১টি স্ট্র্যাটেজি সেভ করুন (Results → 💾 সেভ)। Option Selling Lab-এর বর্তমান বাস্কেটও যোগ করা যায়।'));
-  names.forEach(n => {
+  if (vitems.length < 1) b.append(h('div', {class: 'note'}, 'আগে কমপক্ষে ২টি স্ট্র্যাটেজি ভল্টে সেভ করুন।'));
+  vitems.forEach(it => {
+    const n = it.id;
     const cb = h('input', {type: 'checkbox'}); cb.checked = !!PORT.sel[n]; cb.addEventListener('change', () => PORT.sel[n] = cb.checked);
     const w = h('input', {type: 'number', value: PORT.w[n] || 1, min: 0.1, step: 0.5, style: 'width:62px'}); w.addEventListener('change', () => PORT.w[n] = parseFloat(w.value) || 1);
-    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, n), h('span', {class: 'note', style: 'margin:0'}, 'ওজন ×'), w));
+    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, it.name), h('span', {class: 'note', style: 'margin:0'}, 'ওজন ×'), w));
   });
   if (SELL && SELL.legs) {
     const cb = h('input', {type: 'checkbox'}); cb.checked = PORT.sellOn; cb.addEventListener('change', () => PORT.sellOn = cb.checked);
@@ -6032,7 +6416,7 @@ function renderPortfolio(root) {
   }
   const fa = h('input', {type: 'date'}), fb = h('input', {type: 'date'});
   b.append(F('শুরু (ঐচ্ছিক)', fa), F('শেষ (ঐচ্ছিক)', fb), h('button', {class: 'btn p', on: {click: async () => {
-    const items = names.filter(n => PORT.sel[n]).map(n => ({name: n, type: 'buy', weight: PORT.w[n] || 1, settings: META.presets.user[n]}));
+    const items = vitems.filter(it => PORT.sel[it.id]).map(it => ({id: it.id, name: it.name, type: 'buy', weight: PORT.w[it.id] || 1}));
     if (PORT.sellOn && SELL) items.push({name: 'Selling: ' + (SELL.name || 'বাস্কেট'), type: 'sell', weight: 1, settings: SELL});
     if (items.length < 2) { alert('কমপক্ষে ২টি বাছুন'); return; }
     const r = await runJob({kind: 'portfolio', settings: {items, from: fa.value, to: fb.value}}, 'পোর্টফোলিও'); if (r) { PORT.res = r; renderPresets(); }
@@ -6064,29 +6448,78 @@ function renderPortfolio(root) {
 function kpiBox(l, v, c) { return h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v)); }
 function renderPresets() {
   const root = $('#t-pre'); root.innerHTML = '';
+  const V = META.vault || {folders: [], items: [], trash: 0, dir: ''};
+  const act = V.items.find(x => x.id === VLT.active);
+  if (VLT.active && !act) setActive(null);
+  /* --- Smart Save --- */
   const nm = h('input', {type: 'text', placeholder: 'স্ট্র্যাটেজির নাম'}), nt = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
-  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, F('বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt),
-    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value)}}, '💾 সেভ'),
-    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সেভ ফাইল: presets.json (algo_builder.py-র ফোল্ডারে)। ব্যাকআপের জন্য এই ফাইলটা কপি করে রাখুন।'))));
-  const list = (title, obj, user) => {
-    const box = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, title));
-    const b = h('div', {class: 'body'});
-    const ks = Object.keys(obj);
-    if (!ks.length) b.append(h('div', {class: 'note'}, 'কিছু নেই'));
-    ks.forEach(k => { const mt = (obj[k] || {})._meta; b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap'}, h('span', {style: 'flex:1 1 60%'}, k),
-      h('button', {class: 'btn s', on: {click: () => { S = fixSettings(obj[k]); persist(); renderBuild(); showTab('build'); }}}, 'লোড'),
-      user ? h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + k + '" মুছবেন?')) return; const r = await api('/api/preset/delete', {name: k}); META.presets.user = r.user; renderPresets(); }}}, '🗑') : null,
-      mt ? h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (mt.stats ? 'ট্রেড ' + mt.stats.n + ' | নেট ₹' + mt.stats.net + ' | PF ' + mt.stats.pf + ' | Win ' + mt.stats.win + '% | DD ₹' + mt.stats.dd + ' | ' + mt.stats.from + ' → ' + mt.stats.to : 'সেভের সময় ব্যাকটেস্ট ছিল না') + ' | ' + mt.saved + (mt.note ? ' | ' + mt.note : '')) : null)); });
-    box.append(b); root.append(box);
-  };
+  const fsel = h('select', {}, ...V.folders.map(f => h('option', {value: f}, f)));
+  if (act) fsel.value = act.folder;
+  const sb = h('div', {class: 'body', style: 'padding-top:12px'});
+  if (act) sb.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, '📌 লোড করা আছে: ', h('b', {}, act.name)), h('button', {class: 'btn p', on: {click: updateActive}}, '🔄 আপডেট করুন'));
+  sb.append(F(act ? 'নতুন কপি হিসেবে সেভ (নাম)' : 'বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt), F('ফোল্ডার', fsel),
+    h('button', {class: 'btn ' + (act ? 's' : 'p'), style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value, fsel.value)}}, act ? '💾 নতুন কপি সেভ' : '💾 সেভ'));
+  root.append(h('div', {class: 'card'}, sb));
+  /* --- পোর্টফোলিও --- */
   renderPortfolio(root);
-  list('আমার প্রিসেট', META.presets.user, true);
-  list('নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)', META.presets.builtin, false);
+  /* --- ফোল্ডার চিপ বার --- */
+  const chips = h('div', {style: 'display:flex;gap:6px;overflow-x:auto;padding:4px 2px 8px;-webkit-overflow-scrolling:touch'});
+  const chip = (label, key, extra) => h('button', {class: 'btn s' + (VLT.folder === key ? ' p' : ''), style: 'white-space:nowrap;flex:0 0 auto;padding:5px 11px', on: {click: async () => { VLT.folder = key; if (key === '__trash') { const r = await api('/api/vault/trash_list', {}); VLT.trashItems = r.items || []; } renderPresets(); }}}, label);
+  chips.append(chip('সব (' + V.items.length + ')', 'all'));
+  V.folders.forEach(f => chips.append(chip(f + ' (' + V.items.filter(x => x.folder === f).length + ')', f)));
+  chips.append(h('button', {class: 'btn s', style: 'white-space:nowrap;flex:0 0 auto;padding:5px 11px', on: {click: async () => { const n = prompt('নতুন ফোল্ডারের নাম'); if (!n) return; const r = await api('/api/vault/folder_create', {name: n}); if (r.error) { alert(r.error); return; } META.vault = r; renderPresets(); }}}, '＋ ফোল্ডার'));
+  chips.append(chip('🗑 ট্র্যাশ (' + V.trash + ')', '__trash'));
+  root.append(chips);
+  if (VLT.folder !== 'all' && VLT.folder !== '__trash' && VLT.folder !== 'সাধারণ') {
+    root.append(h('div', {style: 'display:flex;gap:6px;margin-bottom:6px'},
+      h('button', {class: 'btn s', on: {click: async () => { const n = prompt('ফোল্ডারের নতুন নাম', VLT.folder); if (!n || n === VLT.folder) return; const r = await api('/api/vault/folder_rename', {old: VLT.folder, new: n}); if (r.error) { alert(r.error); return; } VLT.folder = n; META.vault = r; renderPresets(); }}}, '✎ নাম বদলান'),
+      h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + VLT.folder + '" ফোল্ডার মুছবেন? ভেতরের স্ট্র্যাটেজি মুছবে না — "সাধারণ"-এ সরে যাবে।')) return; const r = await api('/api/vault/folder_delete', {name: VLT.folder}); if (r.error) { alert(r.error); return; } VLT.folder = 'all'; META.vault = r; renderPresets(); }}}, '✕ ফোল্ডার মুছুন')));
+  }
+  /* --- সার্চ + সর্ট --- */
+  const q = h('input', {type: 'text', placeholder: '🔍 খুঁজুন…', value: VLT.q}); const so = h('select', {}, h('option', {value: 'upd'}, 'সাম্প্রতিক আপডেট'), h('option', {value: 'net'}, 'সর্বোচ্চ নেট'), h('option', {value: 'pf'}, 'সর্বোচ্চ PF')); so.value = VLT.sort;
+  q.addEventListener('input', () => { VLT.q = q.value; drawList(); }); so.addEventListener('change', () => { VLT.sort = so.value; drawList(); });
+  root.append(h('div', {style: 'display:flex;gap:8px;margin-bottom:8px'}, q, so));
+  const box = h('div'); root.append(box);
+  function drawList() {
+    box.innerHTML = '';
+    const trash = VLT.folder === '__trash';
+    let items = trash ? VLT.trashItems : V.items.filter(x => VLT.folder === 'all' || x.folder === VLT.folder);
+    const qq = VLT.q.trim().toLowerCase(); if (qq) items = items.filter(x => (x.name + ' ' + (x.note || '')).toLowerCase().includes(qq));
+    const key = {upd: x => x.updated || '', net: x => (x.summary && x.summary.net) || -1e12, pf: x => (x.summary && x.summary.pf) || -1e12}[VLT.sort];
+    items = items.slice().sort((a, b) => (b.pinned - a.pinned) || (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+    if (!items.length) box.append(h('div', {class: 'note'}, trash ? 'ট্র্যাশ ফাঁকা।' : 'এই ফোল্ডারে কিছু নেই।'));
+    items.forEach(it => {
+      const sm = it.summary;
+      const card = h('div', {class: 'card', style: 'margin-bottom:8px;' + (it.id === VLT.active ? 'border-color:#26c281' : '')});
+      const b = h('div', {class: 'body'});
+      b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'},
+        trash ? h('span', {}, '🗑') : h('button', {class: 'btn s', style: 'padding:2px 8px;color:' + (it.pinned ? '#f5c542' : '#7d889b'), on: {click: async () => { const r = await api('/api/vault/pin', {id: it.id, on: !it.pinned}); META.vault = r; renderPresets(); }}}, it.pinned ? '★' : '☆'),
+        h('b', {style: 'flex:1'}, it.name), h('span', {class: 'pill'}, it.folder)));
+      b.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, sm ? 'ট্রেড ' + sm.n + ' | নেট ' + inr(sm.net) + ' | PF ' + sm.pf + ' | Win ' + sm.win + '% | DD ' + inr(sm.dd) : 'ব্যাকটেস্ট সারাংশ নেই (সেভের আগে Run দিন)', it.note ? ' — ' + it.note : ''));
+      const row = h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;flex-wrap:wrap'});
+      if (trash) {
+        row.append(h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/vault/restore', {id: it.id}); META.vault = r; const t = await api('/api/vault/trash_list', {}); VLT.trashItems = t.items || []; renderPresets(); }}}, '↩ ফিরিয়ে আনুন'),
+          h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + it.name + '" স্থায়ীভাবে মুছবেন? আর ফেরানো যাবে না।')) return; await api('/api/vault/purge', {id: it.id}); const r = await api('/api/vault/list', {}); META.vault = r; const t = await api('/api/vault/trash_list', {}); VLT.trashItems = t.items || []; renderPresets(); }}}, '✕ স্থায়ী মুছুন'));
+      } else {
+        row.append(h('button', {class: 'btn p s', on: {click: async () => { const r = await api('/api/vault/get', {id: it.id}); if (r.error) { alert(r.error); return; } S = fixSettings(r.settings); persist(); setActive(it.id); renderBuild(); showTab('build'); $('#status').textContent = '✓ লোড: ' + it.name; }}}, 'লোড'),
+          h('button', {class: 'btn s', on: {click: async () => { const f = prompt('কোন ফোল্ডারে সরাবেন?\n' + V.folders.join(' | '), it.folder); if (!f || f === it.folder) return; const r = await api('/api/vault/move', {id: it.id, folder: f}); if (r.error) { alert(r.error); return; } META.vault = r; renderPresets(); }}}, '📁 সরান'),
+          h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/vault/duplicate', {id: it.id}); META.vault = r; renderPresets(); }}}, '⎘ কপি'),
+          h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + it.name + '" ট্র্যাশে পাঠাবেন? (পরে ফিরিয়ে আনা যাবে)')) return; const r = await api('/api/vault/delete', {id: it.id}); if (it.id === VLT.active) setActive(null); META.vault = r; renderPresets(); }}}, '🗑 মুছুন'));
+      }
+      b.append(row); card.append(b); box.append(card);
+    });
+  }
+  drawList();
+  root.append(h('div', {class: 'note'}, '📂 ভল্ট ফোল্ডার (ব্যাকআপ নিতে এটা কপি করুন): ', h('code', {}, V.dir || META.vault_dir || ''), ' — কোড আপডেট/git pull-এ এটা মোছে না।'));
+  /* --- নমুনা টেমপ্লেট --- */
+  const tb = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, 'নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)')), tbd = h('div', {class: 'body'});
+  Object.keys(META.presets.builtin).forEach(k => tbd.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center'}, h('span', {style: 'flex:1'}, k), h('button', {class: 'btn s', on: {click: () => { S = fixSettings(META.presets.builtin[k]); persist(); setActive(null); renderBuild(); showTab('build'); }}}, 'লোড'))));
+  tb.append(tbd); root.append(tb);
   const ta = h('textarea', {rows: 6, placeholder: 'এখানে JSON পেস্ট করে Import করুন', style: 'font-family:monospace;font-size:11px'});
   root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, ta,
     h('button', {class: 'btn s', on: {click: () => { ta.value = JSON.stringify(S, null, 1); }}}, 'Export (বর্তমান সেটিং)'),
     h('button', {class: 'btn s', on: {click: () => { try { S = fixSettings(JSON.parse(ta.value)); persist(); renderBuild(); showTab('build'); } catch (e) { alert('JSON ঠিক নেই: ' + e.message); } }}}, 'Import'),
-    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
+    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); setActive(null); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
 }
 
 
@@ -6495,14 +6928,17 @@ function renderAI() {
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'রুল অ্যাব্লেশন (কোন এন্ট্রি-শর্ত আসলে কাজ করছে), ফিল্টার মাইনিং, স্মার্ট সার্চ ও রোলিং Walk-Forward। কমপক্ষে ~৫০ ট্রেড দরকার।'))));
   if (AIR2) drawAI2(root, AIR2);
   /* ---- LLM কো-পাইলট (ঐচ্ছিক) ---- */
-  const lk = h('input', {type: 'password', placeholder: 'Anthropic API Key (ঐচ্ছিক, শুধু এই ফোনে থাকে)', style: 'flex:1 1 100%'}); try { lk.value = localStorage.getItem('gb_llm_key') || ''; } catch (e) {}
+  const lk = h('input', {type: 'password', placeholder: 'Gemini (AIza...) বা Anthropic (sk-ant-...) API Key — শুধু এই ফোনে থাকে', style: 'flex:1 1 100%'}); try { lk.value = localStorage.getItem('gb_llm_key') || ''; } catch (e) {}
   lk.addEventListener('change', () => { try { localStorage.setItem('gb_llm_key', lk.value.trim()); } catch (e) {} });
+  const lm = h('input', {type: 'text', placeholder: 'মডেল (ঐচ্ছিক) — ফাঁকা = ডিফল্ট (Gemini: gemini-3.5-flash-lite)', style: 'flex:1 1 100%'}); try { lm.value = localStorage.getItem('gb_llm_model') || ''; } catch (e) {}
+  lm.addEventListener('change', () => { try { localStorage.setItem('gb_llm_model', lm.value.trim()); } catch (e) {} });
+  const prov = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}); const showProv = () => { const k = lk.value.trim(); prov.textContent = !k ? '' : k.startsWith('AIza') ? '✓ Google Gemini শনাক্ত' : k.startsWith('sk-ant-') ? '✓ Anthropic শনাক্ত' : '⚠ Key-র ধরন চেনা যায়নি (AIza… বা sk-ant-…)'; }; lk.addEventListener('input', showProv); showProv();
   const li = h('textarea', {rows: 2, placeholder: 'আইডিয়া লিখুন, যেমন: "১৫ মিনিটের ORB ব্রেকআউটে ADX ২০-র ওপরে হলে CE কিনব"', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
   const lo = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'});
   root.append(h('div', {class: 'h2'}, '🤖 LLM কো-পাইলট (ঐচ্ছিক)'));
-  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, lk, li,
-    h('button', {class: 'btn p', on: {click: async () => { lo.textContent = 'ভাবছে…'; const r = await api('/api/copilot', {mode: 'idea', text: li.value, key: lk.value.trim()}); if (r.error) { lo.textContent = '⚠ ' + r.error; return; } S.cases.push(r.case); persist(); renderBuild(); lo.textContent = '✓ নতুন Case যোগ হয়েছে: ' + r.case.name + ' — Strategy ট্যাবে দেখে নিন, তারপর Run দিন।'; }}}, '💡 আইডিয়া → Case'),
-    h('button', {class: 'btn s', on: {click: async () => { if (!AIR2 && !AIR) { lo.textContent = 'আগে অ্যাডভাইজার চালান।'; return; } lo.textContent = 'ব্যাখ্যা তৈরি হচ্ছে…'; const A = AIR2 || AIR; const pl = AIR2 ? {validation: A.validation, base: A.base, final: A.final, wfo: A.wfo, changes: A.changes, ablation: A.ablation} : {validation: A.validation, changes: A.changes}; const r = await api('/api/copilot', {mode: 'explain', payload: pl, key: lk.value.trim()}); lo.textContent = r.error ? '⚠ ' + r.error : r.text; lo.style.whiteSpace = 'pre-wrap'; }}}, '🗣 ফলাফল ব্যাখ্যা'),
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, lk, prov, lm, li,
+    h('button', {class: 'btn p', on: {click: async () => { lo.textContent = 'ভাবছে…'; const r = await api('/api/copilot', {mode: 'idea', text: li.value, key: lk.value.trim(), model: lm.value.trim()}); if (r.error) { lo.textContent = '⚠ ' + r.error; return; } S.cases.push(r.case); persist(); renderBuild(); lo.textContent = '✓ নতুন Case যোগ হয়েছে: ' + r.case.name + ' — Strategy ট্যাবে দেখে নিন, তারপর Run দিন।'; }}}, '💡 আইডিয়া → Case'),
+    h('button', {class: 'btn s', on: {click: async () => { if (!AIR2 && !AIR) { lo.textContent = 'আগে অ্যাডভাইজার চালান।'; return; } lo.textContent = 'ব্যাখ্যা তৈরি হচ্ছে…'; const A = AIR2 || AIR; const pl = AIR2 ? {validation: A.validation, base: A.base, final: A.final, wfo: A.wfo, changes: A.changes, ablation: A.ablation} : {validation: A.validation, changes: A.changes}; const r = await api('/api/copilot', {mode: 'explain', payload: pl, key: lk.value.trim(), model: lm.value.trim()}); lo.textContent = r.error ? '⚠ ' + r.error : r.text; lo.style.whiteSpace = 'pre-wrap'; }}}, '🗣 ফলাফল ব্যাখ্যা'),
     lo, h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'LLM কোনো গণিত করে না — শুধু আইডিয়াকে Case-এ রূপ দেয় (আমাদের ইঞ্জিন যাচাই করে) ও ফলাফল বোঝায়। Key ইন্টারনেটের মাধ্যমে Anthropic-এ যায়; না দিলে পুরো সিস্টেম আগের মতোই অফলাইনে চলে।'))));
   /* ---- অনুরোধ বাক্স ---- */
   const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});

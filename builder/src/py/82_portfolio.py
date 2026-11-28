@@ -10,6 +10,8 @@ def portfolio_run(D, payload, progress=None):
     runs = []
     for k, it in enumerate(items):
         w = float(it.get("weight") or 1.0)
+        if it.get("id") and not it.get("settings"):
+            it = dict(it, settings=VAULT.get(it["id"])["settings"])
         raw = copy.deepcopy(it["settings"])
         if d_from:
             raw.setdefault("general", {})["from"] = d_from

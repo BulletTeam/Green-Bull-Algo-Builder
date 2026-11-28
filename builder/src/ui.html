@@ -42,7 +42,7 @@ section[hidden]{display:none}
 .f{display:flex;flex-direction:column;gap:3px;min-width:92px;flex:1 1 92px}
 .f>span{font-size:11px;color:var(--mut);letter-spacing:.2px}
 .f.chk{flex-direction:row;align-items:center;gap:8px;flex:1 1 100%}
-select,input[type=text],input[type=number],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
+select,input[type=text],input[type=number],input[type=password],input[type=date],input[type=time],textarea{background:#0a120e;color:var(--tx);border:1px solid var(--line);border-radius:10px;padding:9px 10px;font-size:14px;width:100%;min-width:0;transition:border-color .15s,box-shadow .15s}
 select:focus,input:focus,textarea:focus{outline:0;border-color:var(--ac);box-shadow:0 0 0 3px #22d36b22}
 input[type=checkbox]{width:19px;height:19px;accent-color:var(--ac)}
 .ind{width:100%;background:#0a120e;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}
@@ -434,18 +434,27 @@ async function loadDS(inst, from, to, status) {
 }
 let BUSY = false;
 let LASTRUN = null;
-async function saveStrategy(name, note) {
+let VLT = {folder: 'all', q: '', sort: 'upd', active: null, trash: false, trashItems: []};
+try { VLT.active = localStorage.getItem('gb_active_id') || null; } catch (e) {}
+function setActive(id) { VLT.active = id; try { if (id) localStorage.setItem('gb_active_id', id); else localStorage.removeItem('gb_active_id'); } catch (e) {} }
+function vsummary() {
+  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; return {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), from: LAST.meta.from, to: LAST.meta.to}; }
+  return null;
+}
+async function saveStrategy(name, note, folder) {
   name = (name || '').trim();
   if (!name) { alert('স্ট্র্যাটেজির নাম দিন'); return false; }
-  if (META.presets.user[name] && !confirm('"' + name + '" নামে আগেই সেভ আছে। বদলে নতুনটা সেভ করবেন?')) return false;
-  const snap = JSON.parse(JSON.stringify(S));
-  const m = {saved: new Date().toISOString().slice(0, 16).replace('T', ' '), note: (note || '').trim()};
-  if (LAST && LASTRUN === JSON.stringify(S)) { const a = LAST.stats.all; m.stats = {n: a.n, net: Math.round(a.net), pf: +a.pf.toFixed(2), win: +a.win.toFixed(1), dd: Math.round(a.dd), rr: +a.rr.toFixed(2), from: LAST.meta.from, to: LAST.meta.to}; }
-  snap._meta = m;
-  const r = await api('/api/preset/save', {name, settings: snap});
-  META.presets.user = r.user; renderPresets();
-  $('#status').textContent = '✓ সেভ হয়েছে: ' + name;
+  const r = await api('/api/vault/save', {name, note: (note || '').trim(), settings: JSON.parse(JSON.stringify(S)), summary: vsummary(), folder: folder || (VLT.folder !== 'all' && VLT.folder !== '__trash' ? VLT.folder : null)});
+  if (r.error) { alert(r.error); return false; }
+  META.vault = r; setActive(r.id); renderPresets();
+  $('#status').textContent = '✓ ভল্টে সেভ হয়েছে: ' + name;
   return true;
+}
+async function updateActive() {
+  if (!VLT.active) return false;
+  const r = await api('/api/vault/update', {id: VLT.active, settings: JSON.parse(JSON.stringify(S)), summary: vsummary()});
+  if (r.error) { alert(r.error); return false; }
+  META.vault = r; renderPresets(); $('#status').textContent = '✓ আপডেট হয়েছে (একই স্ট্র্যাটেজি)'; return true;
 }
 async function runJob(payload, label) {
   if (BUSY) return null;
@@ -1116,14 +1125,15 @@ function renderSweep() {
 /* ---------- 📊 পোর্টফোলিও: একাধিক স্ট্র্যাটেজি একসাথে + কোরিলেশন ---------- */
 let PORT = {sel: {}, w: {}, res: null, sellOn: false};
 function renderPortfolio(root) {
-  const names = Object.keys(META.presets.user || {});
-  const box = h('div', {class: 'card'}), b = h('div', {class: 'body'});
+  const vitems = ((META.vault || {}).items || []);
+  const box = h('details', {class: 'card'}), b = h('div', {class: 'body'});
   box.append(h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, '📊 পোর্টফোলিও ব্যাকটেস্ট (একাধিক স্ট্র্যাটেজি একসাথে)'));
-  if (names.length < 1) b.append(h('div', {class: 'note'}, 'আগে কমপক্ষে ১টি স্ট্র্যাটেজি সেভ করুন (Results → 💾 সেভ)। Option Selling Lab-এর বর্তমান বাস্কেটও যোগ করা যায়।'));
-  names.forEach(n => {
+  if (vitems.length < 1) b.append(h('div', {class: 'note'}, 'আগে কমপক্ষে ২টি স্ট্র্যাটেজি ভল্টে সেভ করুন।'));
+  vitems.forEach(it => {
+    const n = it.id;
     const cb = h('input', {type: 'checkbox'}); cb.checked = !!PORT.sel[n]; cb.addEventListener('change', () => PORT.sel[n] = cb.checked);
     const w = h('input', {type: 'number', value: PORT.w[n] || 1, min: 0.1, step: 0.5, style: 'width:62px'}); w.addEventListener('change', () => PORT.w[n] = parseFloat(w.value) || 1);
-    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, n), h('span', {class: 'note', style: 'margin:0'}, 'ওজন ×'), w));
+    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, it.name), h('span', {class: 'note', style: 'margin:0'}, 'ওজন ×'), w));
   });
   if (SELL && SELL.legs) {
     const cb = h('input', {type: 'checkbox'}); cb.checked = PORT.sellOn; cb.addEventListener('change', () => PORT.sellOn = cb.checked);
@@ -1131,7 +1141,7 @@ function renderPortfolio(root) {
   }
   const fa = h('input', {type: 'date'}), fb = h('input', {type: 'date'});
   b.append(F('শুরু (ঐচ্ছিক)', fa), F('শেষ (ঐচ্ছিক)', fb), h('button', {class: 'btn p', on: {click: async () => {
-    const items = names.filter(n => PORT.sel[n]).map(n => ({name: n, type: 'buy', weight: PORT.w[n] || 1, settings: META.presets.user[n]}));
+    const items = vitems.filter(it => PORT.sel[it.id]).map(it => ({id: it.id, name: it.name, type: 'buy', weight: PORT.w[it.id] || 1}));
     if (PORT.sellOn && SELL) items.push({name: 'Selling: ' + (SELL.name || 'বাস্কেট'), type: 'sell', weight: 1, settings: SELL});
     if (items.length < 2) { alert('কমপক্ষে ২টি বাছুন'); return; }
     const r = await runJob({kind: 'portfolio', settings: {items, from: fa.value, to: fb.value}}, 'পোর্টফোলিও'); if (r) { PORT.res = r; renderPresets(); }
@@ -1163,29 +1173,78 @@ function renderPortfolio(root) {
 function kpiBox(l, v, c) { return h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v)); }
 function renderPresets() {
   const root = $('#t-pre'); root.innerHTML = '';
+  const V = META.vault || {folders: [], items: [], trash: 0, dir: ''};
+  const act = V.items.find(x => x.id === VLT.active);
+  if (VLT.active && !act) setActive(null);
+  /* --- Smart Save --- */
   const nm = h('input', {type: 'text', placeholder: 'স্ট্র্যাটেজির নাম'}), nt = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
-  root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, F('বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt),
-    h('button', {class: 'btn p', style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value)}}, '💾 সেভ'),
-    h('div', {class: 'note', style: 'flex:1 1 100%'}, 'সেভ ফাইল: presets.json (algo_builder.py-র ফোল্ডারে)। ব্যাকআপের জন্য এই ফাইলটা কপি করে রাখুন।'))));
-  const list = (title, obj, user) => {
-    const box = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, title));
-    const b = h('div', {class: 'body'});
-    const ks = Object.keys(obj);
-    if (!ks.length) b.append(h('div', {class: 'note'}, 'কিছু নেই'));
-    ks.forEach(k => { const mt = (obj[k] || {})._meta; b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center;flex-wrap:wrap'}, h('span', {style: 'flex:1 1 60%'}, k),
-      h('button', {class: 'btn s', on: {click: () => { S = fixSettings(obj[k]); persist(); renderBuild(); showTab('build'); }}}, 'লোড'),
-      user ? h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + k + '" মুছবেন?')) return; const r = await api('/api/preset/delete', {name: k}); META.presets.user = r.user; renderPresets(); }}}, '🗑') : null,
-      mt ? h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (mt.stats ? 'ট্রেড ' + mt.stats.n + ' | নেট ₹' + mt.stats.net + ' | PF ' + mt.stats.pf + ' | Win ' + mt.stats.win + '% | DD ₹' + mt.stats.dd + ' | ' + mt.stats.from + ' → ' + mt.stats.to : 'সেভের সময় ব্যাকটেস্ট ছিল না') + ' | ' + mt.saved + (mt.note ? ' | ' + mt.note : '')) : null)); });
-    box.append(b); root.append(box);
-  };
+  const fsel = h('select', {}, ...V.folders.map(f => h('option', {value: f}, f)));
+  if (act) fsel.value = act.folder;
+  const sb = h('div', {class: 'body', style: 'padding-top:12px'});
+  if (act) sb.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, '📌 লোড করা আছে: ', h('b', {}, act.name)), h('button', {class: 'btn p', on: {click: updateActive}}, '🔄 আপডেট করুন'));
+  sb.append(F(act ? 'নতুন কপি হিসেবে সেভ (নাম)' : 'বর্তমান সেটিং সেভ করুন', nm), F('নোট', nt), F('ফোল্ডার', fsel),
+    h('button', {class: 'btn ' + (act ? 's' : 'p'), style: 'align-self:flex-end', on: {click: () => saveStrategy(nm.value, nt.value, fsel.value)}}, act ? '💾 নতুন কপি সেভ' : '💾 সেভ'));
+  root.append(h('div', {class: 'card'}, sb));
+  /* --- পোর্টফোলিও --- */
   renderPortfolio(root);
-  list('আমার প্রিসেট', META.presets.user, true);
-  list('নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)', META.presets.builtin, false);
+  /* --- ফোল্ডার চিপ বার --- */
+  const chips = h('div', {style: 'display:flex;gap:6px;overflow-x:auto;padding:4px 2px 8px;-webkit-overflow-scrolling:touch'});
+  const chip = (label, key, extra) => h('button', {class: 'btn s' + (VLT.folder === key ? ' p' : ''), style: 'white-space:nowrap;flex:0 0 auto;padding:5px 11px', on: {click: async () => { VLT.folder = key; if (key === '__trash') { const r = await api('/api/vault/trash_list', {}); VLT.trashItems = r.items || []; } renderPresets(); }}}, label);
+  chips.append(chip('সব (' + V.items.length + ')', 'all'));
+  V.folders.forEach(f => chips.append(chip(f + ' (' + V.items.filter(x => x.folder === f).length + ')', f)));
+  chips.append(h('button', {class: 'btn s', style: 'white-space:nowrap;flex:0 0 auto;padding:5px 11px', on: {click: async () => { const n = prompt('নতুন ফোল্ডারের নাম'); if (!n) return; const r = await api('/api/vault/folder_create', {name: n}); if (r.error) { alert(r.error); return; } META.vault = r; renderPresets(); }}}, '＋ ফোল্ডার'));
+  chips.append(chip('🗑 ট্র্যাশ (' + V.trash + ')', '__trash'));
+  root.append(chips);
+  if (VLT.folder !== 'all' && VLT.folder !== '__trash' && VLT.folder !== 'সাধারণ') {
+    root.append(h('div', {style: 'display:flex;gap:6px;margin-bottom:6px'},
+      h('button', {class: 'btn s', on: {click: async () => { const n = prompt('ফোল্ডারের নতুন নাম', VLT.folder); if (!n || n === VLT.folder) return; const r = await api('/api/vault/folder_rename', {old: VLT.folder, new: n}); if (r.error) { alert(r.error); return; } VLT.folder = n; META.vault = r; renderPresets(); }}}, '✎ নাম বদলান'),
+      h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + VLT.folder + '" ফোল্ডার মুছবেন? ভেতরের স্ট্র্যাটেজি মুছবে না — "সাধারণ"-এ সরে যাবে।')) return; const r = await api('/api/vault/folder_delete', {name: VLT.folder}); if (r.error) { alert(r.error); return; } VLT.folder = 'all'; META.vault = r; renderPresets(); }}}, '✕ ফোল্ডার মুছুন')));
+  }
+  /* --- সার্চ + সর্ট --- */
+  const q = h('input', {type: 'text', placeholder: '🔍 খুঁজুন…', value: VLT.q}); const so = h('select', {}, h('option', {value: 'upd'}, 'সাম্প্রতিক আপডেট'), h('option', {value: 'net'}, 'সর্বোচ্চ নেট'), h('option', {value: 'pf'}, 'সর্বোচ্চ PF')); so.value = VLT.sort;
+  q.addEventListener('input', () => { VLT.q = q.value; drawList(); }); so.addEventListener('change', () => { VLT.sort = so.value; drawList(); });
+  root.append(h('div', {style: 'display:flex;gap:8px;margin-bottom:8px'}, q, so));
+  const box = h('div'); root.append(box);
+  function drawList() {
+    box.innerHTML = '';
+    const trash = VLT.folder === '__trash';
+    let items = trash ? VLT.trashItems : V.items.filter(x => VLT.folder === 'all' || x.folder === VLT.folder);
+    const qq = VLT.q.trim().toLowerCase(); if (qq) items = items.filter(x => (x.name + ' ' + (x.note || '')).toLowerCase().includes(qq));
+    const key = {upd: x => x.updated || '', net: x => (x.summary && x.summary.net) || -1e12, pf: x => (x.summary && x.summary.pf) || -1e12}[VLT.sort];
+    items = items.slice().sort((a, b) => (b.pinned - a.pinned) || (key(a) < key(b) ? 1 : key(a) > key(b) ? -1 : 0));
+    if (!items.length) box.append(h('div', {class: 'note'}, trash ? 'ট্র্যাশ ফাঁকা।' : 'এই ফোল্ডারে কিছু নেই।'));
+    items.forEach(it => {
+      const sm = it.summary;
+      const card = h('div', {class: 'card', style: 'margin-bottom:8px;' + (it.id === VLT.active ? 'border-color:#26c281' : '')});
+      const b = h('div', {class: 'body'});
+      b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'},
+        trash ? h('span', {}, '🗑') : h('button', {class: 'btn s', style: 'padding:2px 8px;color:' + (it.pinned ? '#f5c542' : '#7d889b'), on: {click: async () => { const r = await api('/api/vault/pin', {id: it.id, on: !it.pinned}); META.vault = r; renderPresets(); }}}, it.pinned ? '★' : '☆'),
+        h('b', {style: 'flex:1'}, it.name), h('span', {class: 'pill'}, it.folder)));
+      b.append(h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, sm ? 'ট্রেড ' + sm.n + ' | নেট ' + inr(sm.net) + ' | PF ' + sm.pf + ' | Win ' + sm.win + '% | DD ' + inr(sm.dd) : 'ব্যাকটেস্ট সারাংশ নেই (সেভের আগে Run দিন)', it.note ? ' — ' + it.note : ''));
+      const row = h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;flex-wrap:wrap'});
+      if (trash) {
+        row.append(h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/vault/restore', {id: it.id}); META.vault = r; const t = await api('/api/vault/trash_list', {}); VLT.trashItems = t.items || []; renderPresets(); }}}, '↩ ফিরিয়ে আনুন'),
+          h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + it.name + '" স্থায়ীভাবে মুছবেন? আর ফেরানো যাবে না।')) return; await api('/api/vault/purge', {id: it.id}); const r = await api('/api/vault/list', {}); META.vault = r; const t = await api('/api/vault/trash_list', {}); VLT.trashItems = t.items || []; renderPresets(); }}}, '✕ স্থায়ী মুছুন'));
+      } else {
+        row.append(h('button', {class: 'btn p s', on: {click: async () => { const r = await api('/api/vault/get', {id: it.id}); if (r.error) { alert(r.error); return; } S = fixSettings(r.settings); persist(); setActive(it.id); renderBuild(); showTab('build'); $('#status').textContent = '✓ লোড: ' + it.name; }}}, 'লোড'),
+          h('button', {class: 'btn s', on: {click: async () => { const f = prompt('কোন ফোল্ডারে সরাবেন?\n' + V.folders.join(' | '), it.folder); if (!f || f === it.folder) return; const r = await api('/api/vault/move', {id: it.id, folder: f}); if (r.error) { alert(r.error); return; } META.vault = r; renderPresets(); }}}, '📁 সরান'),
+          h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/vault/duplicate', {id: it.id}); META.vault = r; renderPresets(); }}}, '⎘ কপি'),
+          h('button', {class: 'btn d s', on: {click: async () => { if (!confirm('"' + it.name + '" ট্র্যাশে পাঠাবেন? (পরে ফিরিয়ে আনা যাবে)')) return; const r = await api('/api/vault/delete', {id: it.id}); if (it.id === VLT.active) setActive(null); META.vault = r; renderPresets(); }}}, '🗑 মুছুন'));
+      }
+      b.append(row); card.append(b); box.append(card);
+    });
+  }
+  drawList();
+  root.append(h('div', {class: 'note'}, '📂 ভল্ট ফোল্ডার (ব্যাকআপ নিতে এটা কপি করুন): ', h('code', {}, V.dir || META.vault_dir || ''), ' — কোড আপডেট/git pull-এ এটা মোছে না।'));
+  /* --- নমুনা টেমপ্লেট --- */
+  const tb = h('div', {class: 'card'}, h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, 'নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)')), tbd = h('div', {class: 'body'});
+  Object.keys(META.presets.builtin).forEach(k => tbd.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:6px;align-items:center'}, h('span', {style: 'flex:1'}, k), h('button', {class: 'btn s', on: {click: () => { S = fixSettings(META.presets.builtin[k]); persist(); setActive(null); renderBuild(); showTab('build'); }}}, 'লোড'))));
+  tb.append(tbd); root.append(tb);
   const ta = h('textarea', {rows: 6, placeholder: 'এখানে JSON পেস্ট করে Import করুন', style: 'font-family:monospace;font-size:11px'});
   root.append(h('div', {class: 'card'}, h('div', {class: 'body', style: 'padding-top:12px'}, ta,
     h('button', {class: 'btn s', on: {click: () => { ta.value = JSON.stringify(S, null, 1); }}}, 'Export (বর্তমান সেটিং)'),
     h('button', {class: 'btn s', on: {click: () => { try { S = fixSettings(JSON.parse(ta.value)); persist(); renderBuild(); showTab('build'); } catch (e) { alert('JSON ঠিক নেই: ' + e.message); } }}}, 'Import'),
-    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
+    h('button', {class: 'btn d s', on: {click: () => { if (confirm('সব সেটিং ডিফল্টে ফেরাবেন?')) { S = fixSettings(META.defaults); persist(); setActive(null); renderBuild(); showTab('build'); } }}}, 'ডিফল্টে ফেরান'))));
 }
 
 
@@ -1594,14 +1653,17 @@ function renderAI() {
     h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'রুল অ্যাব্লেশন (কোন এন্ট্রি-শর্ত আসলে কাজ করছে), ফিল্টার মাইনিং, স্মার্ট সার্চ ও রোলিং Walk-Forward। কমপক্ষে ~৫০ ট্রেড দরকার।'))));
   if (AIR2) drawAI2(root, AIR2);
   /* ---- LLM কো-পাইলট (ঐচ্ছিক) ---- */
-  const lk = h('input', {type: 'password', placeholder: 'Anthropic API Key (ঐচ্ছিক, শুধু এই ফোনে থাকে)', style: 'flex:1 1 100%'}); try { lk.value = localStorage.getItem('gb_llm_key') || ''; } catch (e) {}
+  const lk = h('input', {type: 'password', placeholder: 'Gemini (AIza...) বা Anthropic (sk-ant-...) API Key — শুধু এই ফোনে থাকে', style: 'flex:1 1 100%'}); try { lk.value = localStorage.getItem('gb_llm_key') || ''; } catch (e) {}
   lk.addEventListener('change', () => { try { localStorage.setItem('gb_llm_key', lk.value.trim()); } catch (e) {} });
+  const lm = h('input', {type: 'text', placeholder: 'মডেল (ঐচ্ছিক) — ফাঁকা = ডিফল্ট (Gemini: gemini-3.5-flash-lite)', style: 'flex:1 1 100%'}); try { lm.value = localStorage.getItem('gb_llm_model') || ''; } catch (e) {}
+  lm.addEventListener('change', () => { try { localStorage.setItem('gb_llm_model', lm.value.trim()); } catch (e) {} });
+  const prov = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}); const showProv = () => { const k = lk.value.trim(); prov.textContent = !k ? '' : k.startsWith('AIza') ? '✓ Google Gemini শনাক্ত' : k.startsWith('sk-ant-') ? '✓ Anthropic শনাক্ত' : '⚠ Key-র ধরন চেনা যায়নি (AIza… বা sk-ant-…)'; }; lk.addEventListener('input', showProv); showProv();
   const li = h('textarea', {rows: 2, placeholder: 'আইডিয়া লিখুন, যেমন: "১৫ মিনিটের ORB ব্রেকআউটে ADX ২০-র ওপরে হলে CE কিনব"', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});
   const lo = h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'});
   root.append(h('div', {class: 'h2'}, '🤖 LLM কো-পাইলট (ঐচ্ছিক)'));
-  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, lk, li,
-    h('button', {class: 'btn p', on: {click: async () => { lo.textContent = 'ভাবছে…'; const r = await api('/api/copilot', {mode: 'idea', text: li.value, key: lk.value.trim()}); if (r.error) { lo.textContent = '⚠ ' + r.error; return; } S.cases.push(r.case); persist(); renderBuild(); lo.textContent = '✓ নতুন Case যোগ হয়েছে: ' + r.case.name + ' — Strategy ট্যাবে দেখে নিন, তারপর Run দিন।'; }}}, '💡 আইডিয়া → Case'),
-    h('button', {class: 'btn s', on: {click: async () => { if (!AIR2 && !AIR) { lo.textContent = 'আগে অ্যাডভাইজার চালান।'; return; } lo.textContent = 'ব্যাখ্যা তৈরি হচ্ছে…'; const A = AIR2 || AIR; const pl = AIR2 ? {validation: A.validation, base: A.base, final: A.final, wfo: A.wfo, changes: A.changes, ablation: A.ablation} : {validation: A.validation, changes: A.changes}; const r = await api('/api/copilot', {mode: 'explain', payload: pl, key: lk.value.trim()}); lo.textContent = r.error ? '⚠ ' + r.error : r.text; lo.style.whiteSpace = 'pre-wrap'; }}}, '🗣 ফলাফল ব্যাখ্যা'),
+  root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, lk, prov, lm, li,
+    h('button', {class: 'btn p', on: {click: async () => { lo.textContent = 'ভাবছে…'; const r = await api('/api/copilot', {mode: 'idea', text: li.value, key: lk.value.trim(), model: lm.value.trim()}); if (r.error) { lo.textContent = '⚠ ' + r.error; return; } S.cases.push(r.case); persist(); renderBuild(); lo.textContent = '✓ নতুন Case যোগ হয়েছে: ' + r.case.name + ' — Strategy ট্যাবে দেখে নিন, তারপর Run দিন।'; }}}, '💡 আইডিয়া → Case'),
+    h('button', {class: 'btn s', on: {click: async () => { if (!AIR2 && !AIR) { lo.textContent = 'আগে অ্যাডভাইজার চালান।'; return; } lo.textContent = 'ব্যাখ্যা তৈরি হচ্ছে…'; const A = AIR2 || AIR; const pl = AIR2 ? {validation: A.validation, base: A.base, final: A.final, wfo: A.wfo, changes: A.changes, ablation: A.ablation} : {validation: A.validation, changes: A.changes}; const r = await api('/api/copilot', {mode: 'explain', payload: pl, key: lk.value.trim(), model: lm.value.trim()}); lo.textContent = r.error ? '⚠ ' + r.error : r.text; lo.style.whiteSpace = 'pre-wrap'; }}}, '🗣 ফলাফল ব্যাখ্যা'),
     lo, h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'LLM কোনো গণিত করে না — শুধু আইডিয়াকে Case-এ রূপ দেয় (আমাদের ইঞ্জিন যাচাই করে) ও ফলাফল বোঝায়। Key ইন্টারনেটের মাধ্যমে Anthropic-এ যায়; না দিলে পুরো সিস্টেম আগের মতোই অফলাইনে চলে।'))));
   /* ---- অনুরোধ বাক্স ---- */
   const ta = h('textarea', {rows: 2, placeholder: 'যেমন: ড্রডাউন ৩০% কমাও  |  লাভ বাড়াও  |  ট্রেইল চাই না  |  স্ট্রাইক বদলিও না', style: 'width:100%;flex:1 1 100%;background:#0b130f;color:inherit;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit'});

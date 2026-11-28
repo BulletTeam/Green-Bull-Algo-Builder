@@ -465,6 +465,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 sp_i = max(int(np.searchsorted(D.t, te)) - 1, 0)
                 spot_px = float(D.c[sp_i])
                 stk = sk
+                ii = max(int(np.searchsorted(B.e, te, side="right")) - 1, 0)
             else:
                 best = None
                 for k in range(len(cases)):
@@ -503,7 +504,7 @@ def backtest(D, raw, light=False, progress=None, now=None):
                 "reason": r["reason"], "lots": int(r["qty"] // max(lot, 1)), "qty": r["qty"],
                 "gross": round(r["gross"], 2), "costs": round(r["costs"], 2), "net": round(r["net"], 2),
                 "ret": round(r["ret"], 2), "spot": round(spot_px, 2), "bars": r["bars"],
-                "hold": int(r["exit_t"] - te), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
+                "hold": max(int(D.base), int(r["exit_t"] - te)), "ib": int(ii), "mae": round(r["mae"], 2), "mfe": round(r["mfe"], 2),
                 "rret": round(r["rret"], 2),
                 "r": round(r["net"] / r["risk"], 2) if r["risk"] else None,
                 "dte": int(ex - d), "dow": DOWN[(d + 3) % 7], "legs": r["legs"],
@@ -713,7 +714,9 @@ def advanced_stats(trades, cap, days_list, Sx=None, D=None):
     # হিটম্যাপ: সময়-স্লট × বার, মাস × বছর
     hmap = {}
     for t in trades:
-        k = (t["dow"], t["in"][:2] + ":" + ("00" if int(t["in"][3:5]) < 30 else "30"))
+        _m = int(t["in"][:2]) * 60 + int(t["in"][3:5])
+        _b = (_m - OPEN_MIN) // 30 * 30 + OPEN_MIN
+        k = (t["dow"], hm_str(_b))
         hmap[k] = hmap.get(k, 0.0) + t["net"]
     out["heat_slot"] = [{"dow": k[0], "slot": k[1], "net": v} for k, v in hmap.items()]
     mh = {}
