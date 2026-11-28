@@ -668,7 +668,7 @@ function drawAdv(root, V) {
   root.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('button', {class: 'btn p', on: {click: async () => {
     const r = await runJob({kind: 'stress', settings: S}, 'স্ট্রেস টেস্ট');
     if (r) { box.innerHTML = ''; box.append(tbl(['পরিস্থিতি', 'ট্রেড', 'নেট ₹', 'PF', 'Win%', 'Max DD'], r.rows.map(x => [x.k, x.n, pn(x.net), f2(x.pf), x.win.toFixed(0) + '%', inr(x.dd)]))); box.append(h('div', {class: 'note'}, 'স্লিপেজ ×৩-এও নেট ধনাত্মক থাকলে স্ট্র্যাটেজি বাস্তবে (খারাপ ফিলে) টিকবে বলে আশা করা যায়; ×২-এই ঋণাত্মক হলে এজ খুব পাতলা।')); }
-  }}}, '▶ স্ট্রেস টেস্ট চালান'), h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'আসল ইঞ্জিনে ৪ বার চালায় (স্লিপেজ ২×, ৩×, ব্রোকারেজ ১.৫×)।'))));
+  }}}, '▶ স্ট্রেস টেস্ট চালান'), h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, 'আসল ইঞ্জিনে ৬ বার চালায় (স্লিপেজ ২×/৩×, ব্রোকারেজ ১.৫×, +১/+২ ক্যান্ডেল দেরিতে এন্ট্রি)।'))));
   root.append(box);
 }
 /* ---------- একটি ট্রেডের চার্ট (স্পট + প্রিমিয়াম) ---------- */
@@ -676,7 +676,7 @@ const COLS = ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'];
 function hmOf(t) { const d = new Date(t * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }
 /* ---------- চার্ট (নতুন): পিঞ্চ-জুম, ক্রসহেয়ার, সিঙ্ক ---------- */
 let CH = {i: 0};
-const CHS = {view: 'both', hide: {}};
+const CHS = {view: 'both', hide: {}, vol: true, fvg: true, ctx: false, ruler: false};
 const CU = '#26c281', CD = '#ff5d5d';
 function fnum(x, rg) { if (x == null || !isFinite(x)) return '–'; return x.toFixed(rg > 80 ? 0 : rg > 6 ? 1 : 2); }
 function niceStep(span) { for (const s of [300, 600, 900, 1800, 3600, 7200]) if (span / s <= 6.5) return s; return 7200; }
@@ -701,11 +701,13 @@ function drawPane(cv, o, R) {
   (o.bars || []).forEach(k => { if (vis(k.t)) vals.push(k.h, k.l); });
   (o.lines || []).forEach(L => { if (!L.hide) L.data.forEach(p => { if (vis(p.t)) vals.push(p.v); }); });
   (o.steps || []).forEach(L => L.pts.forEach(p => { if (vis(p.t)) vals.push(p.v); })); (o.hl || []).forEach(v => vals.push(v)); (o.hlines || []).forEach(L => vals.push(L.v));
+  (o.hist || []).forEach(k => { if (vis(k.t)) vals.push(k.v, 0); });
   g.fillStyle = '#10151d'; g.fillRect(0, 0, W, H);
   if (!vals.length) { g.fillStyle = '#8b96a8'; g.font = '11px sans-serif'; g.fillText(o.title + ' — এই অংশে ডেটা নেই', 8, 14); return; }
   let mn = Math.min(...vals), mx = Math.max(...vals); if (mx === mn) { mx += 1; mn -= 1; }
   const rg = mx - mn, pd = rg * 0.07; mn -= pd; mx += pd;
   const Y = v => padT + (H - padT - padB) * (1 - (v - mn) / (mx - mn));
+  cv._inv = y => mn + (mx - mn) * (1 - (y - padT) / (H - padT - padB));
   const dec = (mx - mn);
   g.font = '10px sans-serif'; g.textBaseline = 'middle';
   for (let k = 0; k <= 4; k++) {
@@ -733,6 +735,9 @@ function drawPane(cv, o, R) {
     for (let i = lo.data.length - 1; i >= 0; i--) g.lineTo(X(lo.data[i].t + o.lstep / 2), Y(lo.data[i].v));
     g.closePath(); g.fill();
   }
+  // FVG বক্স ও ভলিউম হিস্টোগ্রাম
+  (o.boxes || []).forEach(bx => { const xa = X(bx.a), xb = X(bx.b + o.step), y1 = Y(bx.hi), y2 = Y(bx.lo); g.fillStyle = bx.k === 'bull' ? 'rgba(38,194,129,.14)' : 'rgba(255,93,93,.14)'; g.fillRect(xa, y1, Math.max(xb - xa, 2), Math.max(y2 - y1, 1)); g.fillStyle = bx.k === 'bull' ? '#26c281' : '#ff5d5d'; g.font = '9px sans-serif'; g.textAlign = 'left'; g.fillText('FVG', xa + 2, y1 + 8); });
+  (o.hist || []).forEach(k => { if (!vis(k.t)) return; const w = Math.max(1, (X(k.t + o.step) - X(k.t)) * 0.7), xc = X(k.t + o.step / 2); g.fillStyle = k.up ? 'rgba(38,194,129,.7)' : 'rgba(255,93,93,.7)'; g.fillRect(xc - w / 2, Y(k.v), w, Math.max(1, Y(0) - Y(k.v))); });
   // ক্যান্ডেল
   (o.bars || []).forEach(k => {
     if (!vis(k.t)) return;
@@ -753,6 +758,16 @@ function drawPane(cv, o, R) {
     pill(g, fnum(L.v, 0.1), W - padR + 1, Y(L.v), L.color, '#0b0f14', 'left');
     g.fillStyle = L.color; g.font = '10px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'; g.fillText(L.name, x0 + 4, Y(L.v) - 7);
   });
+  if (R.ruler && R.ruler.id === cv._id && R.ruler.a) {
+    const A = R.ruler.a, Bp = R.ruler.b || null, xa = X(A.t), ya = Y(A.p);
+    g.fillStyle = '#f5c542'; g.beginPath(); g.arc(xa, ya, 4, 0, 6.3); g.fill();
+    if (Bp) {
+      const xb = X(Bp.t), yb = Y(Bp.p), dp = Bp.p - A.p, pc_ = A.p ? dp / A.p * 100 : 0, nb = Math.round((Bp.t - A.t) / o.step);
+      g.strokeStyle = '#f5c542'; g.lineWidth = 1.5; g.setLineDash([5, 3]); g.beginPath(); g.moveTo(xa, ya); g.lineTo(xb, yb); g.stroke(); g.setLineDash([]);
+      g.beginPath(); g.arc(xb, yb, 4, 0, 6.3); g.fill();
+      pill(g, (dp >= 0 ? '+' : '') + fnum(dp, 100) + ' (' + (pc_ >= 0 ? '+' : '') + pc_.toFixed(2) + '%) · ' + nb + ' বার', Math.min(Math.max((xa + xb) / 2, 70), W - padR - 70), Math.min(ya, yb) - 14, '#f5c542', '#0b0f14', 'center');
+    }
+  }
   // ট্রেইলিং / ব্রেকইভেন SL-এর সিঁড়ি-রেখা
   (o.steps || []).forEach(L => {
     if (L.pts.length < 2) return;
@@ -840,6 +855,8 @@ async function openChart(i) {
   if (lv('এন্ট্রি') && lv('টার্গেট')) bands.push({v1: lv('এন্ট্রি').v, v2: lv('টার্গেট').v, color: 'rgba(38,194,129,.10)'});
   const ctl = h('div', {style: 'display:flex;gap:6px;flex-wrap:wrap;margin:0 10px 8px'});
   ov.append(ctl);
+  const ctxBox = h('div', {style: 'margin:0 10px 8px'}); ov.append(ctxBox);
+  const drawCtxBox = () => { ctxBox.innerHTML = ''; if (!CHS.ctx || !d.ctx) return; const cv = h('canvas', {style: 'display:block;border-radius:8px'}); ctxBox.append(h('div', {style: 'font-size:11px;color:#8b96a8;margin-bottom:3px'}, 'মাল্টি-ডে প্রেক্ষাপট (আগের দিনগুলো + আজ, ' + d.tf + 'm বার; PDH/PDL ও গ্যাপ)'), cv); drawCtx(cv, d); };
   const info = h('div', {style: 'margin:0 10px 8px;min-height:88px;font-size:12px;line-height:1.5;background:#131922;border:1px solid #2a3445;border-radius:8px;padding:6px 9px;color:#c7d0de'}, 'চার্টে আঙুল রাখুন বা টানুন: ক্রসহেয়ার ও মান দেখাবে। দুই আঙুলে জুম/সরানো, ডবল-ট্যাপে পুরো দিন। ওপরের নামে ট্যাপ করলে ইন্ডিকেটর লুকাবে।');
   ov.append(info);
   const box = h('div', {style: 'position:relative;margin:0 0 6px;touch-action:pan-y;user-select:none;-webkit-user-select:none'}); ov.append(box);
@@ -851,7 +868,8 @@ async function openChart(i) {
     const v = CHS.view, single = v !== 'both', Hm = single ? 330 : 250;
     const list = [];
     if (v !== 'prem') {
-      list.push(['spot', Hm, {title: 'স্পট ' + d.tf + 'm', bars: d.spot, step: tfs, lstep: tfs, lines: lines(d.overlays, 's:'), zone, marks: d.marks.spot.map(m => Object.assign({win}, m))}]);
+      list.push(['spot', Hm, {title: 'স্পট ' + d.tf + 'm', bars: d.spot, step: tfs, lstep: tfs, lines: lines(d.overlays, 's:'), zone, boxes: CHS.fvg ? d.fvg : [], hlines: [d.pdh != null ? {v: d.pdh, name: 'PDH', color: '#8b96a8'} : null, d.pdl != null ? {v: d.pdl, name: 'PDL', color: '#8b96a8'} : null].filter(Boolean), marks: d.marks.spot.map(m => Object.assign({win}, m))}]);
+      if (CHS.vol && d.vol && d.vol.length) list.push(['vol', 90, {title: 'ভলিউম (শেষ বারের RVOL: ' + rvolTxt(d) + ')', step: tfs, lstep: tfs, hist: d.vol, zone}]);
       (d.panes || []).forEach((p, k) => list.push(['sp' + k, 110, {title: p.name, step: tfs, lstep: tfs, lines: [{name: '', data: p.data, color: '#56b6c2'}], hl: p.hl, zone}]));
     }
     if (v !== 'spot' && d.prem.length) {
@@ -881,7 +899,8 @@ async function openChart(i) {
   function drawCtl() {
     ctl.innerHTML = '';
     [['both', 'দুটোই'], ['spot', 'স্পট'], ['prem', 'প্রিমিয়াম']].forEach(([k, t]) => ctl.append(chip(t, () => { CHS.view = k; drawCtl(); build(); }, CHS.view === k)));
-    ctl.append(chip('পুরো দিন', fitDay), chip('ট্রেডে ফোকাস', fitTrade), chip('＋', () => zoom(0.6)), chip('－', () => zoom(1.6)), chip('⟵', () => pan(-0.3)), chip('⟶', () => pan(0.3)));
+    ctl.append(chip('পুরো দিন', fitDay), chip('ট্রেডে ফোকাস', fitTrade), chip('＋', () => zoom(0.6)), chip('－', () => zoom(1.6)), chip('⟵', () => pan(-0.3)), chip('⟶', () => pan(0.3)),
+      chip('📏 রুলার', () => { CHS.ruler = !CHS.ruler; R.ruler = null; drawCtl(); redraw(); }, CHS.ruler), chip('▮ ভলিউম', () => { CHS.vol = !CHS.vol; drawCtl(); build(); }, CHS.vol), chip('▭ FVG', () => { CHS.fvg = !CHS.fvg; drawCtl(); build(); }, CHS.fvg), chip('📆 ৩ দিন', () => { CHS.ctx = !CHS.ctx; drawCtl(); drawCtxBox(); }, CHS.ctx));
   }
   const find = (arr, t, step) => arr.find(k => t >= k.t && t < k.t + step);
   function showInfo(t) {
@@ -932,6 +951,11 @@ async function openChart(i) {
     if (moved < 8) {
       const L = local(e), o = L.cv._o;
       if (L.y < 22 && o._leg) { const hit = o._leg.find(z => L.x >= z.a && L.x <= z.b); if (hit) { const key = (o.id.startsWith('p') && o.id !== 'prem' ? 'p:' : (o.id === 'prem' ? 'p:' : 's:')) + hit.n; CHS.hide[key] = !CHS.hide[key]; build(); return; } }
+      if (CHS.ruler && L.cv._inv) {
+        const tt = t0 + Math.floor((tAt(L.x) - t0) / L.cv._o.step) * L.cv._o.step, pt = {t: tt, p: L.cv._inv(L.y)};
+        if (!R.ruler || R.ruler.id !== L.cv._id || R.ruler.b) R.ruler = {id: L.cv._id, a: pt, b: null}; else R.ruler.b = pt;
+        redraw(); return;
+      }
       const now = Date.now(); if (now - tapAt < 320) { fitDay(); tapAt = 0; } else tapAt = now;
     }
   };
@@ -939,8 +963,25 @@ async function openChart(i) {
   box.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') { R.cx = null; redraw(); } });
   box.addEventListener('wheel', e => { e.preventDefault(); const L = local(e), t = tAt(L.x), k = e.deltaY > 0 ? 1.18 : 0.85, f = (L.x - 2) / plotW(); const span = (R.b - R.a) * k; setRange(t - f * span, t - f * span + span); }, {passive: false});
   ov._rs && window.removeEventListener('resize', ov._rs); ov._rs = () => resize(); window.addEventListener('resize', ov._rs);
-  drawCtl(); build();
+  drawCtl(); build(); drawCtxBox();
   ov.append(h('div', {class: 'note', style: 'margin:0 10px 24px'}, 'IN = এন্ট্রি (নীল), OUT = এক্সিট (সবুজ/লাল)। প্রিমিয়ামে নীল রেখা = এন্ট্রি, লাল = প্রথম SL, সবুজ = টার্গেট; হালকা লাল/সবুজ জোন = ঝুঁকি/লাভের এলাকা। ইন্ডিকেটর শুধু এই Case-এর শর্তে ব্যবহার হওয়াগুলো দেখায়।'));
+}
+function rvolTxt(d) { try { const v = d.vol.map(x => x.v), n = v.length; if (n < 6) return '–'; const avg = v.slice(0, n - 1).reduce((a, b) => a + b, 0) / (n - 1); return (v[n - 1] / avg).toFixed(2) + '×'; } catch (e) { return '–'; } }
+function drawCtx(cv, d) {
+  const W = Math.max(cv.parentNode.clientWidth - 20, 220), H = 190, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px'; const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = '#10151d'; g.fillRect(0, 0, W, H);
+  const all = []; d.ctx.forEach(c => c.bars.forEach(b => all.push(b))); if (!all.length) return;
+  let mx = Math.max(...all.map(b => b[1])), mn = Math.min(...all.map(b => b[2])); const pd = (mx - mn) * 0.06; mx += pd; mn -= pd;
+  const n = all.length, L = 4, R_ = 52, bw = (W - L - R_) / n, Y = v => 8 + (H - 22) * (1 - (v - mn) / (mx - mn));
+  let k = 0;
+  d.ctx.forEach((c, ci) => {
+    c.bars.forEach(b => { const x = L + (k + 0.5) * bw, up = b[3] >= b[0]; g.strokeStyle = g.fillStyle = up ? CU : CD; g.beginPath(); g.moveTo(x, Y(b[1])); g.lineTo(x, Y(b[2])); g.stroke(); g.fillRect(x - Math.max(bw * 0.35, 0.5), Y(Math.max(b[0], b[3])), Math.max(bw * 0.7, 1), Math.max(1, Math.abs(Y(b[0]) - Y(b[3])))); k++; });
+    if (ci > 0) { const x = L + (k - c.bars.length) * bw; g.strokeStyle = '#2a3445'; g.beginPath(); g.moveTo(x, 4); g.lineTo(x, H - 14); g.stroke();
+      const pv = d.ctx[ci - 1].bars, gap = c.bars[0][0] - pv[pv.length - 1][3]; g.fillStyle = gap >= 0 ? CU : CD; g.font = '10px sans-serif'; g.textAlign = 'left'; g.fillText('গ্যাপ ' + (gap >= 0 ? '+' : '') + gap.toFixed(0), x + 3, 12); }
+    g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'center'; g.fillText(c.date.slice(5), L + (k - c.bars.length / 2) * bw, H - 4);
+  });
+  [[d.pdh, 'PDH'], [d.pdl, 'PDL']].forEach(([v, nm]) => { if (v == null) return; g.strokeStyle = '#8b96a8'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(L, Y(v)); g.lineTo(W - R_, Y(v)); g.stroke(); g.setLineDash([]); g.fillStyle = '#8b96a8'; g.textAlign = 'left'; g.fillText(nm + ' ' + v.toFixed(0), W - R_ + 3, Y(v) + 3); });
 }
 function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
 function drawLine(id, arr, color, fill) {
@@ -1071,6 +1112,55 @@ function renderSweep() {
 }
 
 /* ---------- প্রিসেট ---------- */
+
+/* ---------- 📊 পোর্টফোলিও: একাধিক স্ট্র্যাটেজি একসাথে + কোরিলেশন ---------- */
+let PORT = {sel: {}, w: {}, res: null, sellOn: false};
+function renderPortfolio(root) {
+  const names = Object.keys(META.presets.user || {});
+  const box = h('div', {class: 'card'}), b = h('div', {class: 'body'});
+  box.append(h('summary', {style: 'padding:11px 12px;font-weight:600;display:block'}, '📊 পোর্টফোলিও ব্যাকটেস্ট (একাধিক স্ট্র্যাটেজি একসাথে)'));
+  if (names.length < 1) b.append(h('div', {class: 'note'}, 'আগে কমপক্ষে ১টি স্ট্র্যাটেজি সেভ করুন (Results → 💾 সেভ)। Option Selling Lab-এর বর্তমান বাস্কেটও যোগ করা যায়।'));
+  names.forEach(n => {
+    const cb = h('input', {type: 'checkbox'}); cb.checked = !!PORT.sel[n]; cb.addEventListener('change', () => PORT.sel[n] = cb.checked);
+    const w = h('input', {type: 'number', value: PORT.w[n] || 1, min: 0.1, step: 0.5, style: 'width:62px'}); w.addEventListener('change', () => PORT.w[n] = parseFloat(w.value) || 1);
+    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, n), h('span', {class: 'note', style: 'margin:0'}, 'ওজন ×'), w));
+  });
+  if (SELL && SELL.legs) {
+    const cb = h('input', {type: 'checkbox'}); cb.checked = PORT.sellOn; cb.addEventListener('change', () => PORT.sellOn = cb.checked);
+    b.append(h('div', {style: 'flex:1 1 100%;display:flex;gap:8px;align-items:center'}, cb, h('span', {style: 'flex:1'}, '🧩 Option Selling: ' + (SELL.name || 'বর্তমান বাস্কেট'))));
+  }
+  const fa = h('input', {type: 'date'}), fb = h('input', {type: 'date'});
+  b.append(F('শুরু (ঐচ্ছিক)', fa), F('শেষ (ঐচ্ছিক)', fb), h('button', {class: 'btn p', on: {click: async () => {
+    const items = names.filter(n => PORT.sel[n]).map(n => ({name: n, type: 'buy', weight: PORT.w[n] || 1, settings: META.presets.user[n]}));
+    if (PORT.sellOn && SELL) items.push({name: 'Selling: ' + (SELL.name || 'বাস্কেট'), type: 'sell', weight: 1, settings: SELL});
+    if (items.length < 2) { alert('কমপক্ষে ২টি বাছুন'); return; }
+    const r = await runJob({kind: 'portfolio', settings: {items, from: fa.value, to: fb.value}}, 'পোর্টফোলিও'); if (r) { PORT.res = r; renderPresets(); }
+  }}}, '▶ পোর্টফোলিও চালান'));
+  box.append(b); root.append(box);
+  const R = PORT.res; if (!R) return;
+  const C = R.combined;
+  root.append(h('h3', {}, 'যৌথ ফল'));
+  root.append(h('div', {class: 'kpis'}, kpiBox('যৌথ নেট', inr(C.net), cls(C.net)), kpiBox('যৌথ Max DD', inr(C.dd), 'neg'), kpiBox('Sharpe', f2(C.sharpe)), kpiBox('Calmar', f2(C.calmar)),
+    kpiBox('DD সাশ্রয় (একা-একা যোগফলের তুলনায়)', C.dd_benefit_pct.toFixed(0) + '%'), kpiBox('ট্রেড / PF', C.n + ' / ' + f2(C.pf))));
+  root.append(tbl(['স্ট্র্যাটেজি', 'ওজন', 'ট্রেড', 'নেট ₹', 'Max DD', 'Sharpe', 'Calmar'], R.rows.map(x => [x.name, x.w, x.n, pn(x.net), inr(x.dd), f2(x.sharpe), f2(x.calmar)])));
+  root.append(h('h3', {}, 'যৌথ ইকুইটি বনাম প্রতিটি স্ট্র্যাটেজি'));
+  const cv = h('canvas', {style: 'width:100%;height:210px;background:#10151d;border-radius:10px'}); root.append(cv);
+  setTimeout(() => {
+    const W = cv.clientWidth || 340, H = 210, dpr = Math.min(window.devicePixelRatio || 1, 2); cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+    const all = [R.equity].concat(R.series), mn = Math.min(0, ...all.map(a => Math.min(...a))), mx = Math.max(0, ...all.map(a => Math.max(...a))), n = R.equity.length, Lm = 6, Rm = 50, Tm = 8, Bm = 14;
+    const X = i => Lm + (W - Lm - Rm) * i / Math.max(n - 1, 1), Y = v => Tm + (H - Tm - Bm) * (1 - (v - mn) / Math.max(mx - mn, 1));
+    g.strokeStyle = '#1c2431'; g.fillStyle = '#7d889b'; g.font = '10px sans-serif';
+    for (let k = 0; k <= 3; k++) { const v = mn + (mx - mn) * k / 3; g.beginPath(); g.moveTo(Lm, Y(v)); g.lineTo(W - Rm, Y(v)); g.stroke(); g.fillText(Math.round(v / 1000) + 'k', W - Rm + 4, Y(v) + 3); }
+    const cols = ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'];
+    R.series.forEach((a, k) => { g.strokeStyle = cols[k % 6]; g.globalAlpha = .75; g.lineWidth = 1.2; g.beginPath(); a.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke(); });
+    g.globalAlpha = 1; g.strokeStyle = '#26c281'; g.lineWidth = 2.4; g.beginPath(); R.equity.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke();
+  }, 0);
+  root.append(h('div', {class: 'note', html: 'মোটা সবুজ = যৌথ; বাকিগুলো একেকটি স্ট্র্যাটেজি। ' + R.names.map((nm, k) => '<span style="color:' + ['#f1c40f', '#c678dd', '#56b6c2', '#e5894f', '#98c379', '#e06c9f'][k % 6] + '">■</span> ' + nm.replace(/</g, '&lt;')).join('  ')}));
+  root.append(h('h3', {}, '🔗 কোরিলেশন ম্যাট্রিক্স (দৈনিক P&L)'));
+  root.append(h('div', {class: 'scroll', html: '<table><tr><th></th>' + R.names.map((_, i) => '<th>S' + (i + 1) + '</th>').join('') + '</tr>' + R.corr.map((row, i) => '<tr><th style="text-align:left">S' + (i + 1) + ' ' + R.names[i].slice(0, 16).replace(/</g, '&lt;') + '</th>' + row.map((v, j) => '<td style="text-align:center;background:' + (i === j ? 'rgba(125,136,155,.25)' : v >= 0 ? 'rgba(255,93,93,' + (Math.abs(v) * .7).toFixed(2) + ')' : 'rgba(38,194,129,' + (Math.abs(v) * .7).toFixed(2) + ')') + '">' + v.toFixed(2) + '</td>').join('') + '</tr>').join('') + '</table>'}));
+  root.append(h('div', {class: 'note'}, 'সবুজ/শূন্যের কাছাকাছি = কম কোরিলেশন (ভালো, একে অপরের ড্রডাউন ঢাকে); লাল = একসাথে হারে। ' + R.note));
+}
+function kpiBox(l, v, c) { return h('div', {class: 'kpi ' + (c === 'neg' ? 'bad' : c === 'pos' ? 'good' : '')}, h('small', {}, l), h('b', {class: c || ''}, v)); }
 function renderPresets() {
   const root = $('#t-pre'); root.innerHTML = '';
   const nm = h('input', {type: 'text', placeholder: 'স্ট্র্যাটেজির নাম'}), nt = h('input', {type: 'text', placeholder: 'নোট (ঐচ্ছিক)'});
@@ -1088,6 +1178,7 @@ function renderPresets() {
       mt ? h('div', {class: 'note', style: 'flex:1 1 100%;margin:0'}, (mt.stats ? 'ট্রেড ' + mt.stats.n + ' | নেট ₹' + mt.stats.net + ' | PF ' + mt.stats.pf + ' | Win ' + mt.stats.win + '% | DD ₹' + mt.stats.dd + ' | ' + mt.stats.from + ' → ' + mt.stats.to : 'সেভের সময় ব্যাকটেস্ট ছিল না') + ' | ' + mt.saved + (mt.note ? ' | ' + mt.note : '')) : null)); });
     box.append(b); root.append(box);
   };
+  renderPortfolio(root);
   list('আমার প্রিসেট', META.presets.user, true);
   list('নমুনা টেমপ্লেট (শুধু উদাহরণ, নিজের মতো বদলান)', META.presets.builtin, false);
   const ta = h('textarea', {rows: 6, placeholder: 'এখানে JSON পেস্ট করে Import করুন', style: 'font-family:monospace;font-size:11px'});
@@ -1329,6 +1420,38 @@ function drawPayoff() {
     out.append(h('div', {class: 'note'}, 'সবুজ কঠিন = এক্সপায়ারি পে-অফ; হলুদ ড্যাশ = T+0 (Black-Scholes); নীলচে ব্যান্ড = ±1SD/±2SD; ধূসর রেখা = এন্ট্রির স্পট, কমলা = স্লাইডারের স্পট। POP/IV কেবল মডেল-অনুমান, ভবিষ্যদ্বাণী নয়।'));
   }
   setTimeout(redraw, 0);
+  /* Greeks কার্ভ (স্পট বনাম Net Δ / Net Θ) ও IV স্কিউ */
+  const gb = h('div'); box.append(gb);
+  const gcv = h('canvas', {style: 'width:100%;height:200px;background:#10151d;border-radius:10px'});
+  gb.append(h('h3', {}, '📐 Greeks কার্ভ — স্পট বনাম Net Δ (সবুজ) ও Net Θ/দিন (হলুদ)'), gcv);
+  setTimeout(() => {
+    const W = gcv.clientWidth || 340, H = 200, dpr = Math.min(window.devicePixelRatio || 1, 2); gcv.width = W * dpr; gcv.height = H * dpr; const g = gcv.getContext('2d'); g.scale(dpr, dpr);
+    const sg = l => l.act === 'BUY' ? 1 : -1, lo = P.spot * 0.9, hi = P.spot * 1.1, N = 120, xs = [], dl = [], th = [];
+    for (let i = 0; i <= N; i++) { const S = lo + (hi - lo) * i / N; let a = 0, b = 0; P.legs.forEach(l => { const iv = Math.max((l.iv || P.atm_iv) / 100, 0.02), gg = jG(S, l.strike, Math.max(l.T_days, 0.01) / 365, iv, l.opt, P.rf), q = l.qty * sg(l); a += gg.delta * q; b += gg.theta * q; }); xs.push(S); dl.push(a); th.push(b); }
+    const L = 6, Rr = 6, Tp = 8, B = 20, X = v => L + (W - L - Rr) * (v - lo) / (hi - lo);
+    const sc = (arr, y0, y1) => { const mn = Math.min(...arr, 0), mx = Math.max(...arr, 0), rg = Math.max(mx - mn, 1e-9); return v => y0 + (y1 - y0) * (1 - (v - mn) / rg); };
+    const Yd = sc(dl, Tp, H - B), Yt = sc(th, Tp, H - B);
+    g.strokeStyle = '#2f4a3b'; g.beginPath(); g.moveTo(L, Yd(0)); g.lineTo(W - Rr, Yd(0)); g.stroke();
+    const ln = (arr, Y, col) => { g.strokeStyle = col; g.lineWidth = 2; g.beginPath(); arr.forEach((v, i) => i ? g.lineTo(X(xs[i]), Y(v)) : g.moveTo(X(xs[i]), Y(v))); g.stroke(); };
+    ln(dl, Yd, '#26c281'); ln(th, Yt, '#f1c40f');
+    g.strokeStyle = '#8b96a8'; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(P.spot), Tp); g.lineTo(X(P.spot), H - B); g.stroke(); g.setLineDash([]);
+    g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'center'; for (let k = 0; k <= 4; k++) { const v = lo + (hi - lo) * k / 4; g.fillText(Math.round(v), X(v), H - 6); }
+  }, 0);
+  const sk = h('div'); box.append(sk);
+  box.append(h('div', {class: 'card'}, h('div', {class: 'body'}, h('button', {class: 'btn s', on: {click: async () => {
+    const r = await api('/api/sell/chain', {date: P.date, time: (SELL.entry && SELL.entry.time) || '09:20'}); sk.innerHTML = '';
+    if (r.error) { sk.append(h('div', {class: 'warn'}, r.error)); return; }
+    sk.append(h('h3', {}, '📈 IV স্কিউ — ' + r.time + ' · স্পট ' + Math.round(r.spot) + ' · এক্সপায়ারি ' + r.expiry));
+    const c2 = h('canvas', {style: 'width:100%;height:210px;background:#10151d;border-radius:10px'}); sk.append(c2);
+    const W = c2.clientWidth || 340, H = 210, dpr = Math.min(window.devicePixelRatio || 1, 2); c2.width = W * dpr; c2.height = H * dpr; const g = c2.getContext('2d'); g.scale(dpr, dpr);
+    const rows = r.rows.filter(x => x.iv != null), ks = rows.map(x => x.strike), k0 = Math.min(...ks), k1 = Math.max(...ks), iv0 = Math.min(...rows.map(x => x.iv)), iv1 = Math.max(...rows.map(x => x.iv));
+    const X = v => 36 + (W - 44) * (v - k0) / Math.max(k1 - k0, 1), Y = v => 10 + (H - 32) * (1 - (v - iv0) / Math.max(iv1 - iv0, 0.01));
+    g.fillStyle = '#7d889b'; g.font = '10px sans-serif'; g.textAlign = 'right'; [iv0, (iv0 + iv1) / 2, iv1].forEach(v => g.fillText(v.toFixed(1) + '%', 32, Y(v) + 3));
+    g.textAlign = 'center'; for (let k = 0; k <= 4; k++) { const v = k0 + (k1 - k0) * k / 4; g.fillText(Math.round(v), X(v), H - 6); }
+    [['CE', '#26c281'], ['PE', '#ff5d5d']].forEach(([t, col]) => { g.strokeStyle = col; g.lineWidth = 2; g.beginPath(); let f = true; rows.filter(x => x.opt === t).forEach(x => { f ? g.moveTo(X(x.strike), Y(x.iv)) : g.lineTo(X(x.strike), Y(x.iv)); f = false; }); g.stroke(); g.fillStyle = col; g.textAlign = 'left'; g.fillText(t, t === 'CE' ? 44 : 70, 14); });
+    g.strokeStyle = '#8b96a8'; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(X(r.spot), 8); g.lineTo(X(r.spot), H - 20); g.stroke(); g.setLineDash([]);
+    sk.append(h('div', {class: 'note'}, 'স্ট্রাইকওয়ার্ক Black-Scholes IV (সবুজ CE, লাল PE; ড্যাশ = স্পট)। ডেটাবেসে OI নেই বলে Strike-wise OI চার্ট সম্ভব নয়।'));
+  }}}, '📈 IV স্কিউ দেখুন'))));
 }
 function drawSellRes() {
   const box = $('#sell_res'); if (!box) return; box.innerHTML = ''; const r = SELLR, A = r.stats.all, T = r.stats.train, E = r.stats.test;
@@ -1357,6 +1480,16 @@ function drawSellRes() {
 }
 
 /* ---------- 🧠 AI Advisor ---------- */
+
+function hbars(root, labels, vals, title) {
+  const mx = Math.max(1, ...vals.map(Math.abs));
+  root.append(h('div', {class: 'note', style: 'margin-bottom:2px'}, title));
+  root.append(h('div', {style: 'background:#10151d;border-radius:10px;padding:8px 10px', html: labels.map((l, i) => {
+    const w = Math.abs(vals[i]) / mx * 46, pos = vals[i] >= 0;
+    return '<div style="font-size:11px;color:#9aa6b8;margin-top:5px">' + String(l).replace(/</g, '&lt;') + ' <b style="color:' + (pos ? '#ff5d5d' : '#26c281') + '">' + (vals[i] >= 0 ? '+' : '−') + '₹' + Math.abs(Math.round(vals[i])).toLocaleString('en-IN') + '</b></div>' +
+      '<div style="position:relative;height:9px"><div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:#4d5a70"></div><div style="position:absolute;top:1px;height:7px;border-radius:3px;background:' + (pos ? '#ff5d5d' : '#26c281') + ';' + (pos ? 'left:50%;' : 'right:50%;') + 'width:' + w.toFixed(1) + '%"></div></div>';
+  }).join('')}));
+}
 function drawAI2(root, A) {
   const sg = v => (v > 0 ? '+' : '') + inr(v).replace('₹', '₹');
   const pc = v => '<span class="' + (v >= 0 ? 'pos' : 'neg') + '">' + (v >= 0 ? '+' : '−') + '₹' + Math.abs(Math.round(v)).toLocaleString('en-IN') + '</span>';
@@ -1369,6 +1502,7 @@ function drawAI2(root, A) {
   if (A.ablation.length) {
     root.append(h('h3', {}, 'রুল অ্যাব্লেশন — শর্তটি বন্ধ করলে কী হয়'));
     root.append(tbl(['শর্ত', 'ট্রেড', 'নেট Δ', 'TRAIN Δ', 'TEST Δ', 'PF'], A.ablation.map(a => [a.rule, a.n, pc(a.d_net), pc(a.d_train), pc(a.d_test), a.pf.toFixed(2)])));
+    hbars(root, A.ablation.map(a => a.rule), A.ablation.map(a => a.d_net), 'শর্ত বন্ধ করলে নেট বদল (বাঁয়ে = শর্তটি লাভ বাড়াচ্ছে, ডানে = ক্ষতিকর)');
     root.append(h('div', {class: 'note'}, 'Δ ঋণাত্মক = শর্তটি লাভ বাড়াচ্ছে (রাখুন); Δ ধনাত্মক = শর্ত বন্ধ করলে ভালো হতো (শর্তটি ক্ষতিকর/অকেজো হতে পারে)।'));
   }
   if (A.filters.length) {
@@ -1631,18 +1765,44 @@ function drawPaperForm() {
       h('button', {class: 'btn s', on: {click: async () => { PP.test = 'run'; showTest(); try { PP.test = await api('/api/live/test', {inst: (META.info.inst || 'N50')}); } catch (e) { PP.test = {checks: [{name: 'ত্রুটি', ok: false, detail: String(e)}]}; } showTest(); }}}, '🔌 লাইভ কানেকশন টেস্ট'), out);
     showTest();
   }
+  const kl = h('input', {type: 'number', min: 0, placeholder: '0 = বন্ধ', value: PP.kill_loss || ''}); kl.addEventListener('change', () => PP.kill_loss = parseFloat(kl.value) || 0);
+  box.append(F('⛔ Kill-Switch: দৈনিক সর্বোচ্চ লস ₹', kl));
+  if (PP.mode === 'live') {
+    const kf = h('input', {type: 'number', min: 0, placeholder: '0 = বন্ধ', value: PP.kill_feed || ''}); kf.addEventListener('change', () => PP.kill_feed = parseInt(kf.value) || 0);
+    const tt = h('input', {type: 'text', placeholder: 'Telegram Bot Token (ঐচ্ছিক)', value: PP.tg_token || ''}), tc = h('input', {type: 'text', placeholder: 'Chat ID', value: PP.tg_chat || ''});
+    tt.addEventListener('change', () => PP.tg_token = tt.value); tc.addEventListener('change', () => PP.tg_chat = tc.value);
+    box.append(F('ফিড টানা ব্যর্থ হলে বন্ধ (বার)', kf), F('Telegram Token', tt), F('Telegram Chat ID', tc),
+      h('button', {class: 'btn s', on: {click: async () => { const r = await api('/api/alert/test', {token: PP.tg_token, chat: PP.tg_chat}); alert(r.ok ? 'টেস্ট বার্তা পাঠানো হয়েছে — Telegram দেখুন' : (r.error || 'ব্যর্থ')); }}}, '📨 অ্যালার্ট টেস্ট'));
+  }
   box.append(h('button', {class: 'btn g', on: {click: async () => {
-    const r = await api('/api/paper/start', {mode: PP.mode, settings: S, from: PP.from, to: PP.to, delay: PP.delay, step: PP.step, band: PP.band, feed: 'upstox', inst: META.info.inst});
+    const r = await api('/api/paper/start', {mode: PP.mode, settings: S, from: PP.from, to: PP.to, delay: PP.delay, step: PP.step, band: PP.band, feed: 'upstox', inst: META.info.inst, kill_loss: PP.kill_loss || 0, kill_feed: PP.kill_feed || 0, tg_token: PP.tg_token || '', tg_chat: PP.tg_chat || ''});
     if (r.error) { alert(r.error); return; }
     PP.last = {running: true, status: 'running', msg: 'শুরু হচ্ছে…', stats: {n: 0, win: 0, pf: 0, dd: 0}, trades: [], events: [], live_pnl: 0}; PP.run = true; PP.sig = '';
     drawPaperForm(); drawPaperStat(); paperPoll();
   }}}, '▶ পেপার শুরু'));
   f.append(h('div', {class: 'card'}, box));
 }
+
+/* সাধারণ লাইন-চার্ট (মিনিট-অক্ষ, মার্কারসহ) */
+function drawSeries(cv, ys, ts, marks, zero) {
+  const W = cv.clientWidth || 340, H = cv.clientHeight || 160, dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  let mn = Math.min(...ys), mx = Math.max(...ys); if (zero) { mn = Math.min(mn, 0); mx = Math.max(mx, 0); } if (mx === mn) { mx += 1; mn -= 1; }
+  const L = 6, R = 48, T = 8, B = 16, X = i => L + (W - L - R) * i / Math.max(ys.length - 1, 1), Y = v => T + (H - T - B) * (1 - (v - mn) / (mx - mn));
+  g.font = '10px sans-serif'; g.fillStyle = '#7d889b'; g.strokeStyle = '#1c2431';
+  for (let k = 0; k <= 3; k++) { const v = mn + (mx - mn) * k / 3, y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(W - R, y); g.stroke(); g.textAlign = 'left'; g.fillText(Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-IN') : v.toFixed(1), W - R + 4, y + 3); }
+  if (zero) { g.strokeStyle = '#4d5a70'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(L, Y(0)); g.lineTo(W - R, Y(0)); g.stroke(); g.setLineDash([]); }
+  const up = ys[ys.length - 1] >= ys[0]; g.strokeStyle = zero ? (ys[ys.length - 1] >= 0 ? '#26c281' : '#ff5d5d') : (up ? '#26c281' : '#ff5d5d'); g.lineWidth = 1.8; g.beginPath();
+  ys.forEach((v, i) => i ? g.lineTo(X(i), Y(v)) : g.moveTo(X(i), Y(v))); g.stroke();
+  const hmm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  [0, Math.floor(ys.length / 2), ys.length - 1].forEach(i => { g.fillStyle = '#7d889b'; g.textAlign = i === 0 ? 'left' : i === ys.length - 1 ? 'right' : 'center'; g.fillText(hmm(ts[i]), X(i), H - 4); });
+  (marks || []).forEach(m => { const mm = parseInt(m.t.slice(0, 2)) * 60 + parseInt(m.t.slice(3, 5)); let bi = 0, bd = 1e9; ts.forEach((t, i) => { const d = Math.abs(t - mm); if (d < bd) { bd = d; bi = i; } });
+    g.fillStyle = m.k === 'ENTRY' ? '#26c281' : m.k === 'EXIT' ? '#ff5d5d' : '#f5c542'; g.beginPath(); g.arc(X(bi), Y(ys[bi]), 5, 0, 7); g.fill(); g.fillStyle = '#fff'; g.font = 'bold 8px sans-serif'; g.textAlign = 'center'; g.fillText(m.k[0], X(bi), Y(ys[bi]) + 3); });
+}
 function drawPaperStat() {
   const root = $('#pp-stat'); if (!root) return;
   const P = PP.last;
-  const sig = JSON.stringify([P && P.status, P && P.msg, P && P.now, P && P.stats && P.stats.n, P && P.live_pnl, P && P.open && P.open.net, P && P.events && P.events.length, PP.stopping, P && P.days_done]);
+  const sig = JSON.stringify([P && P.status, P && P.msg, P && P.now, P && P.stats && P.stats.n, P && P.live_pnl, P && P.open && P.open.net, P && P.events && P.events.length, P && P.mtm && P.mtm.length, PP.stopping, P && P.days_done]);
   if (sig === PP.sig) return; PP.sig = sig;
   root.innerHTML = '';
   if (!P) return;
@@ -1657,6 +1817,16 @@ function drawPaperStat() {
   root.append(h('div', {class: 'kpis'},
     h('div', {class: 'kpi hero ' + (P.live_pnl >= 0 ? 'up' : 'dn')}, h('small', {}, 'মোট P&L (খোলা ট্রেড সহ)'), h('b', {class: cls(P.live_pnl)}, inr(P.live_pnl))),
     [['বন্ধ ট্রেড', st.n], ['Win%', st.win.toFixed(0) + '%'], ['PF', f2(st.pf)], ['সর্বোচ্চ DD', inr(st.dd)]].map(([k, v]) => h('div', {class: 'kpi'}, h('small', {}, k), h('b', {}, String(v))))));
+  if (P.spot && P.spot.length > 1) {
+    root.append(h('h3', {}, '📈 লাইভ স্পট (আজ) ও এন্ট্রি/এক্সিট'));
+    const c1 = h('canvas', {style: 'width:100%;height:170px;background:#10151d;border-radius:10px'}); root.append(c1);
+    setTimeout(() => drawSeries(c1, P.spot.map(x => x[1]), P.spot.map(x => x[0]), (P.events || []).filter(e => e.day === P.day && (e.k === 'ENTRY' || e.k === 'EXIT' || e.k === 'KILL')).map(e => ({t: e.t, k: e.k})), false), 0);
+  }
+  if (P.mtm && P.mtm.length > 1) {
+    root.append(h('h3', {}, '💹 লাইভ MTM ইকুইটি (বন্ধ + খোলা ট্রেড)'));
+    const c2 = h('canvas', {style: 'width:100%;height:150px;background:#10151d;border-radius:10px'}); root.append(c2);
+    setTimeout(() => drawSeries(c2, P.mtm.map(x => x[1]), P.mtm.map(x => x[0] % 1440), [], true), 0);
+  }
   if (P.open) {
     const o = P.open;
     root.append(h('h3', {}, '🟢 চলমান ট্রেড'));

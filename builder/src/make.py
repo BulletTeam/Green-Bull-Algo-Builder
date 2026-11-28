@@ -1,9 +1,11 @@
-import sys
-tpl = open("algo_builder.tpl.py", encoding="utf-8").read()
-html = open("ui.html", encoding="utf-8").read()
+# একক-ফাইল বিল্ডার তৈরি: src/py/*.py (মডিউল, নামের ক্রমে) + src/ui.html → ../algo_builder.py
+#   cd builder/src && python make.py
+import glob, os
+H = os.path.dirname(os.path.abspath(__file__))
+tpl = "".join(open(p, encoding="utf-8").read() for p in sorted(glob.glob(os.path.join(H, "py", "*.py"))))
+html = open(os.path.join(H, "ui.html"), encoding="utf-8").read()
 assert "'''" not in html, "HTML-এ ''' আছে"
-assert not html.rstrip().endswith("\\")
 out = tpl.replace("@@HTML@@", html)
 assert "@@HTML@@" not in out
-open("../algo_builder.py", "w", encoding="utf-8").write(out)
+open(os.path.join(H, "..", "algo_builder.py"), "w", encoding="utf-8").write(out)
 print("built", len(out))
